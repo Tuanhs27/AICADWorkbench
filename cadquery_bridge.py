@@ -8,8 +8,12 @@ or seamlessly bridges official cadquery if installed.
 
 import math
 import sys
-import FreeCAD as App
-import Part
+try:
+    import FreeCAD as App
+    import Part
+except ImportError:
+    App = None
+    Part = None
 
 class Vector:
     def __init__(self, x=0.0, y=0.0, z=0.0):
