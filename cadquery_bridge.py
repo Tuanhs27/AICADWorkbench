@@ -3,8 +3,9 @@
 cadquery_bridge.py: High-fidelity CadQuery compatibility layer for FreeCAD.
 Allows executing CadQuery scripts (from the cleaned Text-to-CAD dataset)
 directly inside FreeCAD's OpenCASCADE engine with zero external dependencies,
-supporting 2D sketches (wires, arcs, polylines, circles, rects), boolean cuts,
-unions, 3D extrusions, selectors (.faces('>Z')), and auto-cutting tools.
+supporting 2D sketches (wires, arcs, polylines, circles, rects, squares),
+variadic boolean cuts (*others), unions, 3D extrusions, revolves, selectors,
+and automatic cutting-tool generation.
 """
 
 import math
@@ -16,6 +17,24 @@ try:
 except ImportError:
     App = None
     Part = None
+
+
+def _is_centered(centered, idx=0):
+    """Safely determine if centered along a specific axis index (0=X, 1=Y, 2=Z)"""
+    if isinstance(centered, (tuple, list)):
+        return bool(centered[idx]) if idx < len(centered) else False
+    return bool(centered)
+
+
+def _flatten_shapes(args):
+    """Flatten nested lists/tuples of shapes or Workplanes"""
+    flat = []
+    for a in args:
+        if isinstance(a, (list, tuple)):
+            flat.extend(_flatten_shapes(a))
+        elif a is not None:
+            flat.append(a)
+    return flat
 
 
 class Vector:
@@ -88,6 +107,7 @@ class Workplane:
         self._edges = []
         self._selected_face = selected_face
         self._pending_2d = None  # ("circle", r) or ("rect", w, h, centered) or ("face", Part.Face)
+        self._pushed_points = []
 
     def center(self, x, y):
         wp = self._clone()
@@ -106,12 +126,18 @@ class Workplane:
         wp._center_offset = (ox, oy, oz)
         return wp
 
+    def pushPoints(self, points):
+        wp = self._clone()
+        wp._pushed_points = list(points)
+        return wp
+
     def _clone(self):
         wp = Workplane(self.plane, self._shape, self._center_offset, self._selected_face)
         wp._cur_pt = self._cur_pt
         wp._pts = list(self._pts)
         wp._edges = list(self._edges)
         wp._pending_2d = self._pending_2d
+        wp._pushed_points = list(self._pushed_points)
         return wp
 
     # ---------------- 2D Sketch Drawing ---------------- #
@@ -153,7 +179,6 @@ class Workplane:
                 edge = Part.Edge(arc)
                 wp._edges.append(edge)
             except Exception:
-                # Fallback to straight segment if colinear
                 edge = Part.LineSegment(p1, p3).toShape()
                 wp._edges.append(edge)
         wp._cur_pt = (float(pt_end[0]), float(pt_end[1]))
@@ -164,7 +189,7 @@ class Workplane:
         wp = self._clone()
         if not points:
             return wp
-        wp.moveTo(points[0][0], points[0][1])
+        wp = wp.moveTo(points[0][0], points[0][1])
         for pt in points[1:]:
             wp = wp.lineTo(pt[0], pt[1])
         return wp
@@ -172,7 +197,6 @@ class Workplane:
     def close(self):
         wp = self._clone()
         if not wp._edges and len(wp._pts) >= 3:
-            # Reconstruct polygon edges from points
             cx, cy, cz = wp._center_offset
             vec_pts = [App.Vector(px + cx, py + cy, cz) for px, py in wp._pts]
             if vec_pts[0] != vec_pts[-1]:
@@ -183,7 +207,6 @@ class Workplane:
             return wp
 
         if wp._edges:
-            # Check if start and end meet; if not, add closing line
             cx, cy, cz = wp._center_offset
             first_pt = App.Vector(wp._pts[0][0] + cx, wp._pts[0][1] + cy, cz)
             last_pt = App.Vector(wp._cur_pt[0] + cx, wp._cur_pt[1] + cy, cz)
@@ -207,6 +230,10 @@ class Workplane:
         wp._pending_2d = ("rect", float(xLen), float(yLen), centered)
         return wp
 
+    def square(self, length, centered=True):
+        """CadQuery square alias for rect(length, length)"""
+        return self.rect(length, length, centered=centered)
+
     # ---------------- 3D Primitives & Operations ---------------- #
 
     def box(self, length, width, height, centered=True):
@@ -214,16 +241,36 @@ class Workplane:
             return self
         length, width, height = float(length), float(width), float(height)
         b = Part.makeBox(length, width, height)
-        if centered is True or (isinstance(centered, (tuple, list)) and any(centered)):
-            cx = -length / 2.0 if (centered is True or centered[0]) else 0.0
-            cy = -width / 2.0 if (centered is True or centered[1]) else 0.0
-            cz = -height / 2.0 if (centered is True or (len(centered) > 2 and centered[2])) else 0.0
-            b.translate(App.Vector(cx, cy, cz))
-        # Account for center offset
+        cx = -length / 2.0 if _is_centered(centered, 0) else 0.0
+        cy = -width / 2.0 if _is_centered(centered, 1) else 0.0
+        cz = -height / 2.0 if _is_centered(centered, 2) else 0.0
+        b.translate(App.Vector(cx, cy, cz))
+
         ox, oy, oz = self._center_offset
         if ox != 0.0 or oy != 0.0 or oz != 0.0:
             b.translate(App.Vector(ox, oy, oz))
         return Workplane(self.plane, b, self._center_offset)
+
+    def cylinder(self, height, radius, centered=True):
+        if Part is None:
+            return self
+        height, radius = float(height), float(radius)
+        c = Part.makeCylinder(radius, height)
+        if _is_centered(centered, 2):
+            c.translate(App.Vector(0, 0, -height / 2.0))
+        ox, oy, oz = self._center_offset
+        if ox != 0.0 or oy != 0.0 or oz != 0.0:
+            c.translate(App.Vector(ox, oy, oz))
+        return Workplane(self.plane, c, self._center_offset)
+
+    def sphere(self, radius):
+        if Part is None:
+            return self
+        s = Part.makeSphere(float(radius))
+        ox, oy, oz = self._center_offset
+        if ox != 0.0 or oy != 0.0 or oz != 0.0:
+            s.translate(App.Vector(ox, oy, oz))
+        return Workplane(self.plane, s, self._center_offset)
 
     def _build_2d_shape(self):
         """Construct a Part.Face from pending 2D sketch"""
@@ -234,15 +281,22 @@ class Workplane:
 
         if kind == "circle":
             r = self._pending_2d[1]
-            c = Part.makeCircle(r, App.Vector(cx, cy, cz), App.Vector(0, 0, 1))
-            w = Part.Wire([Part.Edge(c)])
-            return Part.Face(w)
+            if self._pushed_points:
+                faces = []
+                for px, py in self._pushed_points:
+                    c = Part.makeCircle(r, App.Vector(px + cx, py + cy, cz), App.Vector(0, 0, 1))
+                    faces.append(Part.Face(Part.Wire([Part.Edge(c)])))
+                return Part.Compound(faces) if len(faces) > 1 else faces[0]
+            else:
+                c = Part.makeCircle(r, App.Vector(cx, cy, cz), App.Vector(0, 0, 1))
+                w = Part.Wire([Part.Edge(c)])
+                return Part.Face(w)
         elif kind == "face":
             return self._pending_2d[1]
         elif kind == "rect":
             xLen, yLen, centered = self._pending_2d[1], self._pending_2d[2], self._pending_2d[3]
-            ox = cx - (xLen / 2.0 if centered else 0.0)
-            oy = cy - (yLen / 2.0 if centered else 0.0)
+            ox = cx - (xLen / 2.0 if _is_centered(centered, 0) else 0.0)
+            oy = cy - (yLen / 2.0 if _is_centered(centered, 1) else 0.0)
             poly = Part.makePolygon([
                 App.Vector(ox, oy, cz),
                 App.Vector(ox + xLen, oy, cz),
@@ -283,6 +337,14 @@ class Workplane:
 
         return Workplane(self.plane, shape, self._center_offset)
 
+    def revolve(self, angleDegrees=360.0, axisStart=(0, 0, 0), axisEnd=(0, 0, 1)):
+        face_2d = self._build_2d_shape() or self.val()
+        p1 = App.Vector(axisStart[0], axisStart[1], axisStart[2])
+        p2 = App.Vector(axisEnd[0], axisEnd[1], axisEnd[2])
+        v_dir = p2 - p1 if p1.Length > 0 else p2
+        shape = face_2d.revolve(p1, v_dir, float(angleDegrees))
+        return Workplane(self.plane, shape, self._center_offset)
+
     def faces(self, selector=">Z"):
         """Select face by direction, e.g. >Z, <Z, >X, <X, >Y, <Y"""
         if self._shape is None or not hasattr(self._shape, "Faces") or not self._shape.Faces:
@@ -308,8 +370,16 @@ class Workplane:
 
         return Workplane(self.plane, self._shape, self._center_offset, selected_face=target)
 
+    def solids(self):
+        return self
+
+    def edges(self):
+        return getattr(self.val(), "Edges", [])
+
+    def vertices(self):
+        return getattr(self.val(), "Vertexes", [])
+
     def workplane(self, offset=0.0, centerOption="ProjectedCenter", invert=False):
-        """Create new workplane referencing the selected face"""
         wp = self._clone()
         if self._selected_face is not None:
             cm = self._selected_face.CenterOfMass
@@ -317,7 +387,6 @@ class Workplane:
         return wp
 
     def cutThruAll(self):
-        """Cut through entire shape using the pending 2D sketch"""
         if self._shape is None:
             raise ValueError("No 3D solid to cut through!")
         face_2d = self._build_2d_shape()
@@ -328,19 +397,16 @@ class Workplane:
         return Workplane(self.plane, result, self._center_offset)
 
     def cutBlind(self, distance):
-        """Cut blind hole by distance into solid"""
         if self._shape is None:
             raise ValueError("No 3D solid to cut!")
         face_2d = self._build_2d_shape()
         if face_2d is None:
             raise ValueError("No 2D sketch defined for cutBlind!")
-        distance = float(distance)
-        cutter = face_2d.extrude(App.Vector(0, 0, -distance))
+        cutter = face_2d.extrude(App.Vector(0, 0, -float(distance)))
         result = self._shape.cut(cutter)
         return Workplane(self.plane, result, self._center_offset)
 
     def hole(self, diameter, depth=None):
-        """Drill a hole of specified diameter and optional depth"""
         if self._shape is None:
             raise ValueError("No 3D solid to drill hole!")
         radius = float(diameter) / 2.0
@@ -350,8 +416,14 @@ class Workplane:
         else:
             return wp.cutBlind(depth)
 
+    def cboreHole(self, diameter, cboreDiameter, cboreDepth, depth=None):
+        wp = self.hole(diameter, depth)
+        return wp.hole(cboreDiameter, cboreDepth)
+
+    def cskHole(self, diameter, cskDiameter, cskAngle, depth=None):
+        return self.hole(diameter, depth)
+
     def fillet(self, radius):
-        """Fillet solid edges"""
         s = self.val()
         try:
             res = s.makeFillet(float(radius), s.Edges)
@@ -360,7 +432,6 @@ class Workplane:
             return self
 
     def chamfer(self, length):
-        """Chamfer solid edges"""
         s = self.val()
         try:
             res = s.makeChamfer(float(length), s.Edges)
@@ -378,7 +449,14 @@ class Workplane:
 
     def translate(self, vec):
         s = self.val()
-        v = App.Vector(float(vec[0]), float(vec[1]), float(vec[2]) if len(vec) > 2 else 0.0)
+        if hasattr(vec, "to_fc"):
+            v = vec.to_fc()
+        elif hasattr(vec, "x") and hasattr(vec, "y"):
+            v = App.Vector(vec.x, vec.y, getattr(vec, "z", 0.0))
+        elif isinstance(vec, (tuple, list)):
+            v = App.Vector(float(vec[0]), float(vec[1]), float(vec[2]) if len(vec) > 2 else 0.0)
+        else:
+            v = App.Vector(0, 0, 0)
         s_copy = s.copy()
         s_copy.translate(v)
         return Workplane(self.plane, s_copy, self._center_offset)
@@ -392,37 +470,60 @@ class Workplane:
         s_copy.rotate(p1, direction, float(angle_degrees))
         return Workplane(self.plane, s_copy, self._center_offset)
 
-    def union(self, other):
-        s1 = self.val()
-        s2 = other.val() if hasattr(other, "val") else other
-        return Workplane(self.plane, s1.fuse(s2), self._center_offset)
+    def union(self, *others, **kwargs):
+        """Boolean Union supporting variadic arguments: union(o1, o2, o3) or union([o1, o2])"""
+        current_shape = self.val()
+        flat = _flatten_shapes(others)
+        for item in flat:
+            s2 = item.val() if hasattr(item, "val") else item
+            if s2 is not None:
+                current_shape = current_shape.fuse(s2)
+        return Workplane(self.plane, current_shape, self._center_offset)
 
-    def add(self, other):
-        return self.union(other)
+    def add(self, *others, **kwargs):
+        return self.union(*others, **kwargs)
 
     def combine(self):
         return self
 
-    def cut(self, other):
-        s1 = self.val()
-        s2 = other.val() if hasattr(other, "val") else other
+    def cut(self, *others, **kwargs):
+        """Boolean Cut supporting variadic arguments: cut(c1, c2, c3, c4) or cut([c1, c2])"""
+        flat = _flatten_shapes(others)
+        if not flat:
+            return self
 
-        # If s1 is a 3D solid and s2 is a 2D Face / Wire, auto-extrude s2 to cut cleanly
-        s1_is_solid = len(getattr(s1, "Solids", [])) > 0
-        s2_is_solid = len(getattr(s2, "Solids", [])) > 0
+        current_shape = self.val()
+        for item in flat:
+            s2 = item.val() if hasattr(item, "val") else item
+            if s2 is None:
+                continue
 
-        if s1_is_solid and not s2_is_solid:
-            cutter = _make_cutting_tool(s2, s1)
-            result = s1.cut(cutter)
-        else:
-            result = s1.cut(s2)
+            s1_is_solid = len(getattr(current_shape, "Solids", [])) > 0
+            s2_is_solid = len(getattr(s2, "Solids", [])) > 0
 
-        return Workplane(self.plane, result, self._center_offset)
+            if s1_is_solid and not s2_is_solid:
+                cutter = _make_cutting_tool(s2, current_shape)
+                current_shape = current_shape.cut(cutter)
+            elif not s1_is_solid and s2_is_solid:
+                cutter = s2
+                current_shape = current_shape.cut(cutter)
+            else:
+                # Both 3D solids or both 2D faces
+                current_shape = current_shape.cut(s2)
 
-    def intersect(self, other):
-        s1 = self.val()
-        s2 = other.val() if hasattr(other, "val") else other
-        return Workplane(self.plane, s1.common(s2), self._center_offset)
+        return Workplane(self.plane, current_shape, self._center_offset)
+
+    def intersect(self, *others, **kwargs):
+        """Boolean Intersection supporting variadic arguments: intersect(o1, o2)"""
+        flat = _flatten_shapes(others)
+        if not flat:
+            return self
+        current_shape = self.val()
+        for item in flat:
+            s2 = item.val() if hasattr(item, "val") else item
+            if s2 is not None:
+                current_shape = current_shape.common(s2)
+        return Workplane(self.plane, current_shape, self._center_offset)
 
     def val(self):
         if self._shape is not None:
@@ -434,6 +535,9 @@ class Workplane:
         raise ValueError("Workplane has no 3D solid or 2D sketch generated!")
 
     def all(self):
+        return [self.val()]
+
+    def vals(self):
         return [self.val()]
 
     @property
@@ -454,7 +558,6 @@ def show_object(obj, name="AICAD_Model"):
     if shape is None:
         return None
 
-    # Check if AICAD_Model already exists to update it cleanly without cluttering tree
     fc_obj = doc.getObject(name)
     if fc_obj is None:
         fc_obj = doc.addObject("Part::Feature", name)

@@ -6,46 +6,56 @@ import aicad_engine
 
 engine = aicad_engine.AICADEngine()
 
-tests = [
-    ("User Flange with 2D cuts", """
+# Test the exact code that caused: TypeError: Workplane.cut() takes 2 positional arguments but 5 were given
+code_variadic_cut = """
 import cadquery as cq
-workplane = cq.Workplane("XY")
-outer_square = workplane.box(80, 80, 10, centered=(0, 0, 0))
-circle = cq.Workplane("XY").center(4, 4).circle(4)
-hole_1 = outer_square.cut(circle)
-hole_2 = hole_1.cut(circle.translate((40, 0, 0)))
-r = hole_2
-show_object(r)
-"""),
-    ("Arc and Wire Extrusion", """
-import cadquery as cq
-wp = cq.Workplane("XY")
-sketch = wp.moveTo(0.0, 0.0).lineTo(50.0, 0.0).threePointArc((60.0, 10.0), (50.0, 20.0)).lineTo(0.0, 20.0).close()
-r = sketch.extrude(15.0)
-show_object(r)
-"""),
-    ("Faces Selector and CutThruAll", """
-import cadquery as cq
-wp = cq.Workplane("XY")
-body = wp.box(50, 50, 20)
-r = body.faces(">Z").workplane().circle(10).cutThruAll()
-show_object(r)
-"""),
-    ("Polyline and Close", """
-import cadquery as cq
-wp = cq.Workplane("XY")
-r = wp.polyline([(0, 0), (30, 0), (30, 20), (15, 30), (0, 20)]).close().extrude(10)
-show_object(r)
-""")
-]
 
-for name, code in tests:
-    doc = App.newDocument(name.replace(" ", "_"))
-    success, msg = engine.execute_code(code)
-    print(f"[{name}] Success: {success}")
-    if not success:
-        print(msg)
-    else:
-        obj = doc.getObject("AICAD_Model")
-        print(f"[{name}] Shape Volume: {obj.Shape.Volume:.2f}, Faces: {len(obj.Shape.Faces)}")
+# Create a new workplane
+r = cq.Workplane("XY")
 
+# Define the square sketch
+r = r.square(80, centered=(False, False))
+
+# Define the circle for the holes
+circle = cq.Workplane("XY").circle(4)
+
+# Create the rectangular cutouts for the holes (passes 4 arguments to .cut())
+r = r.cut(
+    circle.translate((10, 10)),
+    circle.translate((10, 70)),
+    circle.translate((60, 10)),
+    circle.translate((60, 70))
+)
+
+# Display the final model
+show_object(r)
+"""
+
+doc1 = App.newDocument("TestVariadic2D")
+success1, msg1 = engine.execute_code(code_variadic_cut)
+print("Test 1 (2D variadic cut):", success1, msg1)
+obj1 = doc1.getObject("AICAD_Model")
+if obj1:
+    print("  Obj1 Shape:", obj1.Shape, "Wires:", len(obj1.Shape.Wires))
+
+# Test 3D extruded solid with variadic 2D cuts
+code_variadic_cut_3d = """
+import cadquery as cq
+
+r = cq.Workplane("XY").square(80, centered=(False, False)).extrude(10)
+circle = cq.Workplane("XY").circle(4)
+r = r.cut(
+    circle.translate((10, 10)),
+    circle.translate((10, 70)),
+    circle.translate((60, 10)),
+    circle.translate((60, 70))
+)
+show_object(r)
+"""
+
+doc2 = App.newDocument("TestVariadic3D")
+success2, msg2 = engine.execute_code(code_variadic_cut_3d)
+print("Test 2 (3D solid with variadic 2D cuts):", success2, msg2)
+obj2 = doc2.getObject("AICAD_Model")
+if obj2:
+    print("  Obj2 Volume:", obj2.Shape.Volume, "Faces:", len(obj2.Shape.Faces), "Solids:", len(obj2.Shape.Solids))
