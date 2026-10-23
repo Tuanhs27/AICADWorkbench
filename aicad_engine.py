@@ -124,21 +124,25 @@ class AICADEngine:
         if not code_str:
             raise ValueError("Không có mã nguồn để thực thi!")
 
-        # Ensure cadquery bridge is in sys.modules
-        if "cadquery" not in sys.modules:
-            try:
-                import cadquery
-            except ImportError:
-                sys.modules["cadquery"] = cadquery_bridge
+        # Ensure cadquery bridge is dynamically reloaded from disk
+        import importlib
+        try:
+            import cadquery_bridge
+            importlib.reload(cadquery_bridge)
+        except Exception:
+            pass
+        sys.modules["cadquery"] = cadquery_bridge
 
+        import math
         exec_globals = {
             "App": App,
             "FreeCAD": App,
             "Gui": Gui,
             "FreeCADGui": Gui,
-            "cq": sys.modules.get("cadquery", cadquery_bridge),
-            "cadquery": sys.modules.get("cadquery", cadquery_bridge),
+            "cq": cadquery_bridge,
+            "cadquery": cadquery_bridge,
             "show_object": cadquery_bridge.show_object,
+            "math": math,
             "__name__": "__main__",
         }
 
