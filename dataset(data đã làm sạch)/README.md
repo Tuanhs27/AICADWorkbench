@@ -7,13 +7,14 @@ Tập dữ liệu này được thiết kế và làm sạch phục vụ bài to
 ## 1. Cấu Trúc Thư Mục
 
 ```
-dataset/
-├── raw/                                           # Dữ liệu gốc chưa qua xử lý
+AICADWorkbench/
+├── CAD coder(data chưa làm sạch)/                  # DỮ LIỆU GỐC CHƯA QUA XỬ LÝ
 │   ├── CAD-Coder_train_high_validation.docx       # Tài liệu đặc tả gốc của tác giả
 │   ├── cad_data_train_high.json                   # Tập huấn luyện thô gốc (8.177 mẫu)
 │   └── cad_data_validation.json                   # Tập kiểm định thô gốc (8.817 mẫu)
 │
-└── cleaned/                                       # Dữ liệu đã làm sạch & chuẩn hóa song ngữ
+└── dataset(data đã làm sạch)/                     # DỮ LIỆU ĐÃ LÀM SẠCH & CHUẨN HÓA SONG NGỮ
+    ├── README.md                                  # Tài liệu hướng dẫn
     ├── cad_data_train_cleaned_en.json             # Tập train tiếng Anh đã kiểm định (8.177 mẫu)
     ├── cad_data_train_cleaned_vi.json             # Tập train tiếng Việt đã dịch kỹ thuật (8.177 mẫu)
     ├── cad_data_train_cleaned_bilingual.json      # Tập train Song ngữ EN + VI (16.354 mẫu)
@@ -67,8 +68,8 @@ from datasets import load_dataset
 
 # Nạp tập dữ liệu song ngữ đã làm sạch
 dataset = load_dataset("json", data_files={
-    "train": "dataset/cleaned/cad_data_train_cleaned_bilingual.json",
-    "validation": "dataset/cleaned/cad_data_validation_cleaned_bilingual.json"
+    "train": "dataset(data đã làm sạch)/cad_data_train_cleaned_bilingual.json",
+    "validation": "dataset(data đã làm sạch)/cad_data_validation_cleaned_bilingual.json"
 })
 
 print(dataset["train"][0])
