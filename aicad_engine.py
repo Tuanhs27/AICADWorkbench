@@ -30,9 +30,25 @@ if "cadquery" not in sys.modules:
     except ImportError:
         sys.modules["cadquery"] = cadquery_bridge
 
-DEFAULT_CADQUERY_SYSTEM_PROMPT = """Bạn là trợ lý AI chuyên tạo mã CadQuery (Python) để thiết kế mô hình 3D cho FreeCAD.
-Dựa vào mô tả của người dùng, hãy sinh mã CadQuery chuẩn xác, ngắn gọn gàng trong khối ```python ... ```.
-Gán đối tượng mô hình cuối cùng vào biến 'r'. Không đưa thêm giải thích bên ngoài khối mã."""
+DEFAULT_CADQUERY_SYSTEM_PROMPT = """Bạn là trợ lý AI chuyên tạo mã CadQuery (Python) để thiết kế mô hình 3D cơ khí chính xác cho FreeCAD.
+Dựa vào mô tả của người dùng, hãy sinh mã CadQuery chuẩn xác, ngắn gọn trong khối ```python ... ```.
+
+QUY TẮC CỐT LÕI:
+1. Luôn sử dụng CHÍNH XÁC các kích thước milimet (mm) người dùng yêu cầu. TUYỆT ĐỐI KHÔNG dùng kích thước chuẩn hóa 0.75 hay 0.1 trừ khi người dùng chỉ định.
+2. Với hình tròn hoặc lỗ tròn: dùng .circle(radius) với bán kính = đường kính / 2.0.
+3. Khi tạo khối trụ bậc:
+   base = cq.Workplane('XY').circle(r1).extrude(h1)
+   top = cq.Workplane('XY').workplane(offset=h1).circle(r2).extrude(h2)
+   r = base.union(top)
+4. Khi tạo tấm hoặc mặt bích có nhiều lỗ bu-lông:
+   plate = cq.Workplane('XY').box(length, width, height)
+   holes = cq.Workplane('XY').pushPoints(pts).circle(hole_radius).extrude(height * 2, both=True)
+   r = plate.cut(holes)
+5. Khi tạo ống tròn rỗng:
+   outer = cq.Workplane('XY').circle(r_outer).extrude(h)
+   inner = cq.Workplane('XY').circle(r_inner).extrude(h + 10, both=True)
+   r = outer.cut(inner)
+6. Gán đối tượng mô hình cuối cùng vào biến 'r' và gọi show_object(r). Không đưa thêm giải thích bên ngoài khối mã."""
 
 DEFAULT_FREECAD_SYSTEM_PROMPT = """You are an expert FreeCAD Python developer.
 Generate valid, mathematically precise, robust FreeCAD Python scripts using the `Part` module.
@@ -111,6 +127,41 @@ class AICADEngine:
                 f"Không thể kết nối đến Ollama tại {self.endpoint}.\n"
                 f"Hãy đảm bảo Ollama đang chạy! Chi tiết lỗi: {e}"
             )
+
+    def get_available_models(self):
+        """Fetch installed Ollama models from /api/tags"""
+        url = f"{self.endpoint}/api/tags"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+                return models if models else ["cadquery-ai", "qwen2.5-coder:3b"]
+        except Exception:
+            return ["cadquery-ai", "qwen2.5-coder:3b"]
+
+    def get_model_geometry_stats(self):
+        """Calculate BoundingBox, volume, solids, and faces of the active CAD model"""
+        if App is None or App.ActiveDocument is None:
+            return None
+        doc = App.ActiveDocument
+        obj = doc.getObject("AICAD_Model")
+        if obj is None and doc.Objects:
+            obj = doc.Objects[-1]
+        if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull():
+            return None
+        
+        shape = obj.Shape
+        bbox = shape.BoundBox
+        return {
+            "name": obj.Name,
+            "x": bbox.XMax - bbox.XMin,
+            "y": bbox.YMax - bbox.YMin,
+            "z": bbox.ZMax - bbox.ZMin,
+            "volume": getattr(shape, "Volume", 0.0),
+            "solids": len(getattr(shape, "Solids", [])),
+            "faces": len(getattr(shape, "Faces", []))
+        }
 
     def extract_code(self, response_text):
         """Extract Python code block from markdown response"""

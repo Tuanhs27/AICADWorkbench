@@ -384,6 +384,9 @@ class Workplane:
         if self._selected_face is not None:
             cm = self._selected_face.CenterOfMass
             wp._center_offset = (cm.x, cm.y, cm.z + float(offset))
+        else:
+            cx, cy, cz = wp._center_offset
+            wp._center_offset = (cx, cy, cz + float(offset))
         return wp
 
     def cutThruAll(self):
