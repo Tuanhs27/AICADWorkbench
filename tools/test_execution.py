@@ -48,3 +48,4 @@ for name, code in tests:
     else:
         obj = doc.getObject("AICAD_Model")
         print(f"[{name}] Shape Volume: {obj.Shape.Volume:.2f}, Faces: {len(obj.Shape.Faces)}")
+
