@@ -36,9 +36,10 @@ model = FastLanguageModel.get_peft_model(
     random_state = 3407,
 )
 
-# Bước 4: Nạp Dataset ChatML sạch (cad_data_train_cleaned_vi.json hoặc bilingual)
-# Tải file 'cad_data_train_cleaned_vi.json' lên thư mục làm việc của Colab
-dataset = load_dataset("json", data_files="cad_data_train_cleaned_vi.json", split="train")
+# Bước 4: Nạp Dataset ChatML V2 Đa năng Cơ khí (cad_data_train_v2_mechanical.json)
+# Tải file 'cad_data_train_v2_mechanical.json' lên thư mục làm việc của Colab
+data_file = "cad_data_train_v2_mechanical.json" # Hoặc "cad_data_train_cleaned_vi.json"
+dataset = load_dataset("json", data_files=data_file, split="train")
 
 def formatting_prompts_func(examples):
     convos = examples["messages"]

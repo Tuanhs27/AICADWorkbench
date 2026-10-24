@@ -48,7 +48,19 @@ QUY TẮC CỐT LÕI:
    outer = cq.Workplane('XY').circle(r_outer).extrude(h)
    inner = cq.Workplane('XY').circle(r_inner).extrude(h + 10, both=True)
    r = outer.cut(inner)
-6. Gán đối tượng mô hình cuối cùng vào biến 'r' và gọi show_object(r). Không đưa thêm giải thích bên ngoài khối mã."""
+6. Khi tạo puly rãnh V hoặc chi tiết tròn xoay (revolve):
+   Vẽ nửa mặt cắt trên mặt phẳng XZ và xoay tròn 360 độ quanh trục Z:
+   r = (cq.Workplane('XZ')
+        .moveTo(r_in, -h/2)
+        .lineTo(r_out, -h/2)
+        .lineTo(r_out, -w_v)
+        .lineTo(r_groove, 0)
+        .lineTo(r_out, w_v)
+        .lineTo(r_out, h/2)
+        .lineTo(r_in, h/2)
+        .close()
+        .revolve(360, (0, 0, 0), (0, 0, 1)))
+7. Gán đối tượng mô hình cuối cùng vào biến 'r' và gọi show_object(r). Không đưa thêm giải thích bên ngoài khối mã."""
 
 DEFAULT_FREECAD_SYSTEM_PROMPT = """You are an expert FreeCAD Python developer.
 Generate valid, mathematically precise, robust FreeCAD Python scripts using the `Part` module.
@@ -69,11 +81,16 @@ CRITICAL RULES:
      poly = Part.makePolygon([p1, p2, p3, p1])
      face = Part.Face(poly)
      rib = face.extrude(App.Vector(0, rib_thickness, 0))
-4. Always attach final shape:
+4. Khi tạo puly rãnh V hoặc chi tiết tròn xoay (revolve):
+   Vẽ mặt cắt trên mặt phẳng XZ và xoay quanh trục Z:
+   poly = Part.makePolygon(pts)
+   face = Part.Face(poly)
+   final_shape = face.revolve(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 360)
+5. Always attach final shape:
    obj = doc.addObject("Part::Feature", "ObjectName")
    obj.Shape = final_shape
    doc.recompute()
-5. Output ONLY executable Python code in ```python ... ``` block.
+6. Output ONLY executable Python code in ```python ... ``` block.
 """
 
 class AICADEngine:
@@ -233,4 +250,248 @@ class AICADEngine:
             f"{error_message}\n\n"
             f"Hãy phân tích nguyên nhân và xuất lại đoạn mã hoàn chỉnh đã sửa lỗi trong ```python ... ```."
         )
+
+    def build_modification_prompt(self, edit_instruction, current_code):
+        """Construct multi-turn modification prompt to update existing CAD code based on examiner/user request"""
+        if self.mode == "cadquery":
+            return (
+                f"Dưới đây là mã CadQuery (Python) hiện tại của mô hình 3D đang hiển thị trên FreeCAD:\n"
+                f"```python\n{current_code.strip()}\n```\n\n"
+                f"YÊU CẦU CHỈNH SỬA TỪ GIÁM KHẢO / NGƯỜI DÙNG:\n"
+                f"\"{edit_instruction.strip()}\"\n\n"
+                f"HƯỚNG DẪN THỰC HIỆN:\n"
+                f"1. Hãy điều chỉnh, sửa đổi hoặc bổ sung trực tiếp trên mã nguồn cũ để đáp ứng chính xác yêu cầu chỉnh sửa trên.\n"
+                f"2. Giữ nguyên các phần không bị yêu cầu sửa đổi, tuân thủ các kích thước milimet (mm) chính xác.\n"
+                f"3. Gán đối tượng kết quả cuối cùng vào biến 'r' và gọi show_object(r).\n"
+                f"4. Chỉ xuất khối mã ```python ... ``` hoàn chỉnh, không kèm giải thích bên ngoài."
+            )
+        else:
+            return (
+                f"Below is the current FreeCAD Python script for the active 3D model:\n"
+                f"```python\n{current_code.strip()}\n```\n\n"
+                f"USER / EXAMINER MODIFICATION REQUEST:\n"
+                f"\"{edit_instruction.strip()}\"\n\n"
+                f"INSTRUCTIONS:\n"
+                f"1. Modify or extend the existing script to satisfy the modification request.\n"
+                f"2. Preserve the working parts of the original model.\n"
+                f"3. Attach the final shape to the active document and recompute.\n"
+                f"4. Output ONLY the updated executable Python code inside a ```python ... ``` block."
+            )
+
+    def add_center_hole(self, diameter_mm):
+        """Direct parametric modifier: Cut a cylindrical hole at center of mass"""
+        if App is None or App.ActiveDocument is None or Part is None:
+            return False, "Không có tài liệu FreeCAD đang mở!"
+        doc = App.ActiveDocument
+        obj = doc.getObject("AICAD_Model")
+        if obj is None and doc.Objects:
+            obj = doc.Objects[-1]
+        if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull():
+            return False, "Không tìm thấy vật thể 3D để khoét lỗ!"
+
+        try:
+            shape = obj.Shape
+            cm = shape.CenterOfMass
+            bbox = shape.BoundBox
+            radius = float(diameter_mm) / 2.0
+            z_min = bbox.ZMin - 10.0
+            z_len = (bbox.ZMax - bbox.ZMin) + 20.0
+            hole = Part.makeCylinder(radius, z_len, App.Vector(cm.x, cm.y, z_min), App.Vector(0, 0, 1))
+            obj.Shape = shape.cut(hole)
+            doc.recompute()
+            return True, f"Đã khoét lỗ tròn tâm Ø{diameter_mm}mm thành công!"
+        except Exception as e:
+            return False, f"Lỗi khoét lỗ tâm: {e}"
+
+    def adjust_model_thickness(self, target_thickness_mm):
+        """Direct parametric modifier: Adjust model thickness along Z"""
+        if App is None or App.ActiveDocument is None or Part is None:
+            return False, "Không có tài liệu FreeCAD đang mở!"
+        doc = App.ActiveDocument
+        obj = doc.getObject("AICAD_Model")
+        if obj is None and doc.Objects:
+            obj = doc.Objects[-1]
+        if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull():
+            return False, "Không tìm thấy vật thể 3D!"
+
+        try:
+            shape = obj.Shape
+            bbox = shape.BoundBox
+            current_thickness = bbox.ZMax - bbox.ZMin
+            if current_thickness <= 1e-4:
+                # 2D face: extrude
+                solid = shape.extrude(App.Vector(0, 0, float(target_thickness_mm)))
+                obj.Shape = solid
+            else:
+                scale_z = float(target_thickness_mm) / current_thickness
+                mat = App.Matrix()
+                mat.scale(1.0, 1.0, scale_z)
+                obj.Shape = shape.transformGeometry(mat)
+            doc.recompute()
+            return True, f"Đã điều chỉnh chiều dày Z thành {target_thickness_mm}mm!"
+        except Exception as e:
+            return False, f"Lỗi chỉnh chiều dày: {e}"
+
+    def fillet_model_edges(self, radius_mm=2.0):
+        """Direct parametric modifier: Fillet solid edges"""
+        if App is None or App.ActiveDocument is None or Part is None:
+            return False, "Không có tài liệu FreeCAD đang mở!"
+        doc = App.ActiveDocument
+        obj = doc.getObject("AICAD_Model")
+        if obj is None and doc.Objects:
+            obj = doc.Objects[-1]
+        if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull():
+            return False, "Không tìm thấy vật thể 3D!"
+
+        try:
+            shape = obj.Shape
+            if not shape.Edges:
+                return False, "Vật thể không có cạnh để bo!"
+            res = shape.makeFillet(float(radius_mm), shape.Edges)
+            obj.Shape = res
+            doc.recompute()
+            return True, f"Đã bo tròn các cạnh bán kính R{radius_mm}mm!"
+        except Exception as e:
+            return False, f"Lỗi bo tròn mép: {e}"
+
+    def chamfer_model_edges(self, distance_mm=1.0):
+        """Direct parametric modifier: Chamfer solid edges"""
+        if App is None or App.ActiveDocument is None or Part is None:
+            return False, "Không có tài liệu FreeCAD đang mở!"
+        doc = App.ActiveDocument
+        obj = doc.getObject("AICAD_Model")
+        if obj is None and doc.Objects:
+            obj = doc.Objects[-1]
+        if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull():
+            return False, "Không tìm thấy vật thể 3D!"
+
+        try:
+            shape = obj.Shape
+            if not shape.Edges:
+                return False, "Vật thể không có cạnh để vát!"
+            res = shape.makeChamfer(float(distance_mm), shape.Edges)
+            obj.Shape = res
+            doc.recompute()
+            return True, f"Đã vát mép các cạnh {distance_mm}mm (Chamfer) thành công!"
+        except Exception as e:
+            return False, f"Lỗi vát mép Chamfer: {e}"
+
+    def set_model_color(self, color_name="Thép xám"):
+        """Set visual appearance of the 3D model"""
+        if Gui is None or App is None or App.ActiveDocument is None:
+            return False, "Không có GUI FreeCAD!"
+        doc = App.ActiveDocument
+        obj = doc.getObject("AICAD_Model")
+        if obj is None and doc.Objects:
+            obj = doc.Objects[-1]
+        if obj is None or not hasattr(obj, "ViewObject"):
+            return False, "Không tìm thấy đối tượng hiển thị!"
+
+        colors = {
+            "Thép xám": (0.65, 0.68, 0.72),
+            "Đồng thau": (0.85, 0.65, 0.20),
+            "Nhôm sáng": (0.82, 0.85, 0.88),
+            "Nhựa xanh": (0.15, 0.55, 0.85),
+            "Vàng kim": (0.95, 0.78, 0.15),
+            "Đỏ kỹ thuật": (0.85, 0.25, 0.20)
+        }
+        rgb = colors.get(color_name, (0.7, 0.7, 0.7))
+        try:
+            obj.ViewObject.ShapeColor = rgb
+            return True, f"Đã đổi màu hiển thị sang: {color_name}"
+        except Exception as e:
+            return False, f"Lỗi đổi màu: {e}"
+
+    def build_2d_sketch_prompt(self, user_prompt, plane="XY"):
+        """Prompt specifically for generating a pure 2D sketch/contour without 3D extrusion"""
+        return (
+            f"Bạn là chuyên gia phác thảo CAD 2D. Nhiệm vụ: Dựng bản phác thảo biên dạng phẳng 2D kín (Sketch Contour) trên mặt phẳng '{plane}'.\n\n"
+            f"MÔ TẢ YÊU CẦU 2D TỪ KỸ SƯ:\n"
+            f"\"{user_prompt.strip()}\"\n\n"
+            f"QUY TẮC CỐT LÕI (BƯỚC 1: DỰNG HÌNH 2D):\n"
+            f"1. Sử dụng Workplane('{plane}'). Sử dụng các lệnh 2D chuẩn: .moveTo(), .lineTo(), .threePointArc(), .polyline(), .circle(), .rect(), .close().\n"
+            f"2. TUYỆT ĐỐI KHÔNG ĐÙN 3D (.extrude) hay tạo khối hộp 3D (.box). Đây là bước dựng hình 2D phẳng để kỹ sư kiểm tra biên dạng.\n"
+            f"3. Chu trình phác thảo BẮT BUỘC phải khép kín bằng .close() hoặc tạo thành hình phẳng 2D kín.\n"
+            f"4. Ví dụ phác thảo mặt cắt chi tiết tròn xoay (Puly, Trục bậc) trên mặt phẳng 'XZ':\n"
+            f"   r = (cq.Workplane('XZ')\n"
+            f"        .moveTo(r_in, -h/2)\n"
+            f"        .lineTo(r_out, -h/2)\n"
+            f"        .lineTo(r_out, -w_v)\n"
+            f"        .lineTo(r_groove, 0)\n"
+            f"        .lineTo(r_out, w_v)\n"
+            f"        .lineTo(r_out, h/2)\n"
+            f"        .lineTo(r_in, h/2)\n"
+            f"        .close())\n"
+            f"5. Ví dụ phác thảo biên dạng phẳng (Mặt bích, Tấm gá) trên mặt phẳng 'XY':\n"
+            f"   r = cq.Workplane('XY').rect(80, 80)\n"
+            f"6. Gán đối tượng 2D cuối cùng vào biến 'r' và gọi show_object(r).\n"
+            f"7. Chỉ xuất khối mã ```python ... ``` hoàn chỉnh."
+        )
+
+    def extrude_active_2d(self, distance_mm):
+        """Step 2: Extrude active 2D shape into a 3D solid"""
+        if App is None or App.ActiveDocument is None or Part is None:
+            return False, "Không có tài liệu FreeCAD đang mở!", ""
+        doc = App.ActiveDocument
+        obj = doc.getObject("AICAD_Model")
+        if obj is None and doc.Objects:
+            obj = doc.Objects[-1]
+        if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull():
+            return False, "Không tìm thấy biên dạng 2D để đùn khối!", ""
+
+        try:
+            shape = obj.Shape
+            dist = float(distance_mm)
+            norm = App.Vector(0, 0, 1)
+            if hasattr(shape, "Faces") and shape.Faces:
+                try:
+                    norm = shape.Faces[0].normalAt(0, 0)
+                except Exception:
+                    pass
+            solid = shape.extrude(norm * dist)
+            obj.Shape = solid
+            doc.recompute()
+            try:
+                if hasattr(Gui, "SendMsgToActiveView"):
+                    Gui.SendMsgToActiveView("ViewFit")
+            except Exception:
+                pass
+            snippet = f"\n# Bước 2 (Kỹ sư): Đùn khối 3D (Extrude) dày {dist}mm:\nr = r.extrude({dist})\nshow_object(r)\n"
+            return True, f"Đã đùn khối 3D thành công với chiều dày {dist}mm!", snippet
+        except Exception as e:
+            return False, f"Lỗi đùn khối 3D: {e}", ""
+
+    def revolve_active_2d(self, angle_deg=360.0, axis="Z"):
+        """Step 2: Revolve active 2D shape into a 3D revolved solid (pulley, shaft, cone)"""
+        if App is None or App.ActiveDocument is None or Part is None:
+            return False, "Không có tài liệu FreeCAD đang mở!", ""
+        doc = App.ActiveDocument
+        obj = doc.getObject("AICAD_Model")
+        if obj is None and doc.Objects:
+            obj = doc.Objects[-1]
+        if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull():
+            return False, "Không tìm thấy biên dạng 2D để xoay tròn!", ""
+
+        try:
+            shape = obj.Shape
+            ang = float(angle_deg)
+            if axis.upper() == "Y":
+                v_axis = App.Vector(0, 1, 0)
+            elif axis.upper() == "X":
+                v_axis = App.Vector(1, 0, 0)
+            else:
+                v_axis = App.Vector(0, 0, 1)
+
+            solid = shape.revolve(App.Vector(0, 0, 0), v_axis, ang)
+            obj.Shape = solid
+            doc.recompute()
+            try:
+                if hasattr(Gui, "SendMsgToActiveView"):
+                    Gui.SendMsgToActiveView("ViewFit")
+            except Exception:
+                pass
+            snippet = f"\n# Bước 2 (Kỹ sư): Xoay tròn 3D (Revolve) quanh trục {axis} góc {ang}°:\nr = r.revolve({ang}, (0, 0, 0), {tuple(v_axis)})\nshow_object(r)\n"
+            return True, f"Đã xoay tròn 3D thành công quanh trục {axis} góc {ang}°!", snippet
+        except Exception as e:
+            return False, f"Lỗi xoay tròn 3D: {e}", ""
 

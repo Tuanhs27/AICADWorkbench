@@ -19,6 +19,19 @@ except ImportError:
     Part = None
 
 
+class _CQUtils:
+    """CadQuery utils helper module for mathematical transformations"""
+    @staticmethod
+    def degrees_to_radians(deg):
+        return math.radians(float(deg))
+
+    @staticmethod
+    def radians_to_degrees(rad):
+        return math.degrees(float(rad))
+
+utils = _CQUtils()
+
+
 def _is_centered(centered, idx=0):
     """Safely determine if centered along a specific axis index (0=X, 1=Y, 2=Z)"""
     if isinstance(centered, (tuple, list)):
@@ -109,6 +122,31 @@ class Workplane:
         self._pending_2d = None  # ("circle", r) or ("rect", w, h, centered) or ("face", Part.Face)
         self._pushed_points = []
 
+    def _to_3d_point(self, u, v):
+        """Map 2D sketch plane coordinates (u, v) to 3D global coordinates based on active plane"""
+        if App is None:
+            return None
+        ox, oy, oz = self._center_offset
+        p = str(self.plane).strip().upper()
+        if p in ("XZ", "FRONT"):
+            return App.Vector(float(u) + ox, oy, float(v) + oz)
+        elif p in ("YZ", "SIDE", "RIGHT"):
+            return App.Vector(ox, float(u) + oy, float(v) + oz)
+        else:  # "XY", "TOP", default
+            return App.Vector(float(u) + ox, float(v) + oy, oz)
+
+    def _get_normal(self):
+        """Get extrusion unit normal vector for active workplane"""
+        if App is None:
+            return None
+        p = str(self.plane).strip().upper()
+        if p in ("XZ", "FRONT"):
+            return App.Vector(0, 1, 0)
+        elif p in ("YZ", "SIDE", "RIGHT"):
+            return App.Vector(1, 0, 0)
+        else:
+            return App.Vector(0, 0, 1)
+
     def center(self, x, y):
         wp = self._clone()
         wp._center_offset = (
@@ -142,24 +180,27 @@ class Workplane:
 
     # ---------------- 2D Sketch Drawing ---------------- #
 
+    def __sub__(self, other):
+        return self.cut(other)
+
+    def __add__(self, other):
+        return self.union(other)
+
     def moveTo(self, x, y, z=0.0):
-        wp = self._clone()
-        wp._cur_pt = (float(x), float(y))
-        wp._pts = [(float(x), float(y))]
-        wp._edges = []
-        return wp
+        self._cur_pt = (float(x), float(y))
+        self._pts = [(float(x), float(y))]
+        self._edges = []
+        return self
 
     def lineTo(self, x, y, z=0.0):
-        wp = self._clone()
-        cx, cy, cz = wp._center_offset
-        p1 = App.Vector(wp._cur_pt[0] + cx, wp._cur_pt[1] + cy, cz)
-        p2 = App.Vector(float(x) + cx, float(y) + cy, cz)
-        if (p2 - p1).Length > 1e-6 and Part is not None:
+        p1 = self._to_3d_point(self._cur_pt[0], self._cur_pt[1])
+        p2 = self._to_3d_point(x, y)
+        if p1 is not None and p2 is not None and (p2 - p1).Length > 1e-6 and Part is not None:
             edge = Part.LineSegment(p1, p2).toShape()
-            wp._edges.append(edge)
-        wp._cur_pt = (float(x), float(y))
-        wp._pts.append((float(x), float(y)))
-        return wp
+            self._edges.append(edge)
+        self._cur_pt = (float(x), float(y))
+        self._pts.append((float(x), float(y)))
+        return self
 
     def hLine(self, distance):
         return self.lineTo(self._cur_pt[0] + float(distance), self._cur_pt[1])
@@ -168,67 +209,61 @@ class Workplane:
         return self.lineTo(self._cur_pt[0], self._cur_pt[1] + float(distance))
 
     def threePointArc(self, pt_mid, pt_end):
-        wp = self._clone()
-        cx, cy, cz = wp._center_offset
-        p1 = App.Vector(wp._cur_pt[0] + cx, wp._cur_pt[1] + cy, cz)
-        p2 = App.Vector(float(pt_mid[0]) + cx, float(pt_mid[1]) + cy, cz)
-        p3 = App.Vector(float(pt_end[0]) + cx, float(pt_end[1]) + cy, cz)
-        if Part is not None:
+        p1 = self._to_3d_point(self._cur_pt[0], self._cur_pt[1])
+        p2 = self._to_3d_point(pt_mid[0], pt_mid[1])
+        p3 = self._to_3d_point(pt_end[0], pt_end[1])
+        if Part is not None and p1 is not None and p2 is not None and p3 is not None:
             try:
                 arc = Part.Arc(p1, p2, p3)
                 edge = Part.Edge(arc)
-                wp._edges.append(edge)
+                self._edges.append(edge)
             except Exception:
                 edge = Part.LineSegment(p1, p3).toShape()
-                wp._edges.append(edge)
-        wp._cur_pt = (float(pt_end[0]), float(pt_end[1]))
-        wp._pts.append(wp._cur_pt)
-        return wp
+                self._edges.append(edge)
+        self._cur_pt = (float(pt_end[0]), float(pt_end[1]))
+        self._pts.append(self._cur_pt)
+        return self
 
     def polyline(self, points):
-        wp = self._clone()
         if not points:
-            return wp
-        wp = wp.moveTo(points[0][0], points[0][1])
+            return self
+        self.moveTo(points[0][0], points[0][1])
         for pt in points[1:]:
-            wp = wp.lineTo(pt[0], pt[1])
-        return wp
+            self.lineTo(pt[0], pt[1])
+        return self
 
     def close(self):
-        wp = self._clone()
-        if not wp._edges and len(wp._pts) >= 3:
-            cx, cy, cz = wp._center_offset
-            vec_pts = [App.Vector(px + cx, py + cy, cz) for px, py in wp._pts]
+        if not self._edges and len(self._pts) >= 3:
+            vec_pts = [self._to_3d_point(px, py) for px, py in self._pts]
             if vec_pts[0] != vec_pts[-1]:
                 vec_pts.append(vec_pts[0])
             poly = Part.makePolygon(vec_pts)
             face = Part.Face(poly)
-            wp._pending_2d = ("face", face)
-            return wp
+            self._pending_2d = ("face", face)
+            self._shape = face
+            return self
 
-        if wp._edges:
-            cx, cy, cz = wp._center_offset
-            first_pt = App.Vector(wp._pts[0][0] + cx, wp._pts[0][1] + cy, cz)
-            last_pt = App.Vector(wp._cur_pt[0] + cx, wp._cur_pt[1] + cy, cz)
-            if (first_pt - last_pt).Length > 1e-6 and Part is not None:
-                wp._edges.append(Part.LineSegment(last_pt, first_pt).toShape())
+        if self._edges:
+            first_pt = self._to_3d_point(self._pts[0][0], self._pts[0][1])
+            last_pt = self._to_3d_point(self._cur_pt[0], self._cur_pt[1])
+            if first_pt is not None and last_pt is not None and (first_pt - last_pt).Length > 1e-6 and Part is not None:
+                self._edges.append(Part.LineSegment(last_pt, first_pt).toShape())
             try:
-                wire = Part.Wire(wp._edges)
+                wire = Part.Wire(self._edges)
                 face = Part.Face(wire)
-                wp._pending_2d = ("face", face)
+                self._pending_2d = ("face", face)
+                self._shape = face
             except Exception:
                 pass
-        return wp
+        return self
 
     def circle(self, radius):
-        wp = self._clone()
-        wp._pending_2d = ("circle", float(radius))
-        return wp
+        self._pending_2d = ("circle", float(radius))
+        return self
 
     def rect(self, xLen, yLen, centered=True):
-        wp = self._clone()
-        wp._pending_2d = ("rect", float(xLen), float(yLen), centered)
-        return wp
+        self._pending_2d = ("rect", float(xLen), float(yLen), centered)
+        return self
 
     def square(self, length, centered=True):
         """CadQuery square alias for rect(length, length)"""
@@ -277,33 +312,33 @@ class Workplane:
         if not self._pending_2d or Part is None:
             return None
         kind = self._pending_2d[0]
-        cx, cy, cz = self._center_offset
 
         if kind == "circle":
             r = self._pending_2d[1]
+            norm = self._get_normal()
             if self._pushed_points:
                 faces = []
                 for px, py in self._pushed_points:
-                    c = Part.makeCircle(r, App.Vector(px + cx, py + cy, cz), App.Vector(0, 0, 1))
+                    center = self._to_3d_point(px, py)
+                    c = Part.makeCircle(r, center, norm)
                     faces.append(Part.Face(Part.Wire([Part.Edge(c)])))
                 return Part.Compound(faces) if len(faces) > 1 else faces[0]
             else:
-                c = Part.makeCircle(r, App.Vector(cx, cy, cz), App.Vector(0, 0, 1))
+                center = self._to_3d_point(0, 0)
+                c = Part.makeCircle(r, center, norm)
                 w = Part.Wire([Part.Edge(c)])
                 return Part.Face(w)
         elif kind == "face":
             return self._pending_2d[1]
         elif kind == "rect":
             xLen, yLen, centered = self._pending_2d[1], self._pending_2d[2], self._pending_2d[3]
-            ox = cx - (xLen / 2.0 if _is_centered(centered, 0) else 0.0)
-            oy = cy - (yLen / 2.0 if _is_centered(centered, 1) else 0.0)
-            poly = Part.makePolygon([
-                App.Vector(ox, oy, cz),
-                App.Vector(ox + xLen, oy, cz),
-                App.Vector(ox + xLen, oy + yLen, cz),
-                App.Vector(ox, oy + yLen, cz),
-                App.Vector(ox, oy, cz)
-            ])
+            x0 = -xLen / 2.0 if _is_centered(centered, 0) else 0.0
+            y0 = -yLen / 2.0 if _is_centered(centered, 1) else 0.0
+            p1 = self._to_3d_point(x0, y0)
+            p2 = self._to_3d_point(x0 + xLen, y0)
+            p3 = self._to_3d_point(x0 + xLen, y0 + yLen)
+            p4 = self._to_3d_point(x0, y0 + yLen)
+            poly = Part.makePolygon([p1, p2, p3, p4, p1])
             return Part.Face(poly)
         return None
 
@@ -311,15 +346,22 @@ class Workplane:
         if Part is None:
             return self
         distance = float(distance)
+        norm = self._get_normal()
 
         # 1. If self already holds a 2D Face/Wire shape
         if self._shape is not None and len(getattr(self._shape, "Solids", [])) == 0:
+            if hasattr(self._shape, "Faces") and self._shape.Faces:
+                try:
+                    norm = self._shape.Faces[0].normalAt(0, 0)
+                except Exception:
+                    pass
+            vec = norm * distance
             if both:
                 s = self._shape.copy()
-                s.translate(App.Vector(0, 0, -distance))
-                return Workplane(self.plane, s.extrude(App.Vector(0, 0, distance * 2.0)), self._center_offset)
+                s.translate(norm * (-distance))
+                return Workplane(self.plane, s.extrude(norm * (distance * 2.0)), self._center_offset)
             else:
-                return Workplane(self.plane, self._shape.extrude(App.Vector(0, 0, distance)), self._center_offset)
+                return Workplane(self.plane, self._shape.extrude(vec), self._center_offset)
 
         # 2. Otherwise extrude from pending 2D sketch
         face_2d = self._build_2d_shape()
@@ -327,10 +369,10 @@ class Workplane:
             raise ValueError("No 2D sketch defined to extrude!")
 
         if both:
-            face_2d.translate(App.Vector(0, 0, -distance))
-            shape = face_2d.extrude(App.Vector(0, 0, distance * 2.0))
+            face_2d.translate(norm * (-distance))
+            shape = face_2d.extrude(norm * (distance * 2.0))
         else:
-            shape = face_2d.extrude(App.Vector(0, 0, distance))
+            shape = face_2d.extrude(norm * distance)
 
         if self._shape is not None:
             shape = self._shape.fuse(shape)
@@ -338,10 +380,15 @@ class Workplane:
         return Workplane(self.plane, shape, self._center_offset)
 
     def revolve(self, angleDegrees=360.0, axisStart=(0, 0, 0), axisEnd=(0, 0, 1)):
-        face_2d = self._build_2d_shape() or self.val()
+        face_2d = self._build_2d_shape()
+        if face_2d is None and self._shape is not None:
+            face_2d = self._shape
+        if face_2d is None:
+            raise ValueError("No 2D sketch or face defined to revolve!")
+
         p1 = App.Vector(axisStart[0], axisStart[1], axisStart[2])
         p2 = App.Vector(axisEnd[0], axisEnd[1], axisEnd[2])
-        v_dir = p2 - p1 if p1.Length > 0 else p2
+        v_dir = p2 - p1 if (p2 - p1).Length > 1e-6 else p2
         shape = face_2d.revolve(p1, v_dir, float(angleDegrees))
         return Workplane(self.plane, shape, self._center_offset)
 
