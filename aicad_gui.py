@@ -13,34 +13,103 @@ import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtCore, QtWidgets, QtGui
 
-from aicad_engine import AICADEngine
+from aicad_engine import (
+    AICADEngine,
+    DEFAULT_2D_SKETCH_SYSTEM_PROMPT,
+    DEFAULT_MODIFICATION_SYSTEM_PROMPT
+)
 
 PRESET_2D_SKETCHES = [
-    ("--- Chọn mẫu phác thảo 2D kỹ sư ---", "", "XY"),
+    ("--- Chọn mẫu phác thảo 2D tham số ---", "", "XY", ""),
     (
         "1. Mặt cắt Puly đai thang rãnh V (XZ)",
         "Vẽ nửa mặt cắt puly rãnh chữ V: lỗ trục trong phi 15mm (r=7.5), đường kính ngoài 80mm (r=40), dày 25mm, rãnh chữ V sâu 10mm góc 38 độ ở giữa khép kín.",
-        "XZ"
+        "XZ",
+        """import cadquery as cq
+
+r_in = 7.5
+r_out = 40.0
+h = 25.0
+groove_depth = 10.0
+half_w = 3.44  # 10 * tan(19 deg)
+r_groove = 30.0
+
+# Bước 1: Phác thảo 2D nửa mặt cắt puly trên mặt phẳng đứng XZ
+r = (
+    cq.Workplane('XZ')
+    .moveTo(r_in, -h / 2)
+    .lineTo(r_out, -h / 2)
+    .lineTo(r_out, -half_w)
+    .lineTo(r_groove, 0)
+    .lineTo(r_out, half_w)
+    .lineTo(r_out, h / 2)
+    .lineTo(r_in, h / 2)
+    .close()
+)
+show_object(r)
+"""
     ),
     (
         "2. Biên dạng Mặt bích vuông 80x80 (XY)",
         "Vẽ biên dạng phẳng hình chữ nhật vuông 80x80mm tâm (0,0) khép kín.",
-        "XY"
+        "XY",
+        """import cadquery as cq
+
+# Bước 1: Phác thảo 2D biên dạng mặt bích vuông trên mặt bằng XY
+r = cq.Workplane('XY').rect(80, 80)
+show_object(r)
+"""
     ),
     (
         "3. Biên dạng Mặt bích tròn D100 (XY)",
         "Vẽ đường tròn tâm (0,0) đường kính 100mm (bán kính 50mm) khép kín.",
-        "XY"
+        "XY",
+        """import cadquery as cq
+
+# Bước 1: Phác thảo 2D hình tròn đường kính 100mm
+r = cq.Workplane('XY').circle(50)
+show_object(r)
+"""
     ),
     (
         "4. Mặt cắt Trục bậc 2 tầng (XZ)",
         "Vẽ nửa mặt cắt trục bậc 2 tầng: tầng dưới bán kính 20mm cao 50mm, tầng trên bán kính 10mm cao 30mm khép kín.",
-        "XZ"
+        "XZ",
+        """import cadquery as cq
+
+# Bước 1: Phác thảo 2D nửa mặt cắt trục bậc trên mặt phẳng XZ
+r = (
+    cq.Workplane('XZ')
+    .moveTo(0, 0)
+    .lineTo(20, 0)
+    .lineTo(20, 50)
+    .lineTo(10, 50)
+    .lineTo(10, 80)
+    .lineTo(0, 80)
+    .close()
+)
+show_object(r)
+"""
     ),
     (
         "5. Biên dạng Giá đỡ chữ L 60x60mm (XY)",
         "Vẽ biên dạng chữ L kích thước 60x60mm bề dày 6mm khép kín.",
-        "XY"
+        "XY",
+        """import cadquery as cq
+
+# Bước 1: Phác thảo 2D biên dạng chữ L 60x60 dày 6mm
+r = (
+    cq.Workplane('XY')
+    .moveTo(0, 0)
+    .lineTo(60, 0)
+    .lineTo(60, 6)
+    .lineTo(6, 6)
+    .lineTo(6, 60)
+    .lineTo(0, 60)
+    .close()
+)
+show_object(r)
+"""
     ),
 ]
 
@@ -102,14 +171,15 @@ class LLMInferenceWorker(QtCore.QThread):
     finished = QtCore.Signal(str)
     failed = QtCore.Signal(str)
 
-    def __init__(self, engine, prompt):
+    def __init__(self, engine, prompt, system_prompt=None):
         super().__init__()
         self.engine = engine
         self.prompt = prompt
+        self.system_prompt = system_prompt
 
     def run(self):
         try:
-            raw_response = self.engine.query_ollama(self.prompt)
+            raw_response = self.engine.query_ollama(self.prompt, system_prompt=self.system_prompt)
             code = self.engine.extract_code(raw_response)
             self.finished.emit(code)
         except Exception as e:
@@ -118,7 +188,7 @@ class LLMInferenceWorker(QtCore.QThread):
 
 class AICADDockWidget(QtWidgets.QDockWidget):
     def __init__(self, parent=None):
-        super().__init__("AI CAD Assistant (Quy Trình 3 Bước Kỹ Sư)", parent)
+        super().__init__("AI CAD Assistant (Quy trình 3 bước)", parent)
         self.setObjectName("AICADDockWidget")
         self.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
 
@@ -177,8 +247,8 @@ class AICADDockWidget(QtWidgets.QDockWidget):
         preset_2d_layout = QtWidgets.QHBoxLayout()
         preset_2d_layout.addWidget(QtWidgets.QLabel("Mẫu 2D:"))
         self.preset_2d_combo = QtWidgets.QComboBox()
-        for title, _, _ in PRESET_2D_SKETCHES:
-            self.preset_2d_combo.addItem(title)
+        for item in PRESET_2D_SKETCHES:
+            self.preset_2d_combo.addItem(item[0])
         self.preset_2d_combo.currentIndexChanged.connect(self.on_preset_2d_selected)
         preset_2d_layout.addWidget(self.preset_2d_combo)
         layout_s1.addLayout(preset_2d_layout)
@@ -201,7 +271,7 @@ class AICADDockWidget(QtWidgets.QDockWidget):
         self.btn_draw_2d.clicked.connect(self.on_draw_2d_clicked)
         layout_s1.addWidget(self.btn_draw_2d)
 
-        tip_s1 = QtWidgets.QLabel("<small style='color:#6B7280;'>Dựng biên dạng kín 2D (Wire/Face) để kỹ sư kiểm tra hình học trước khi lên khối.</small>")
+        tip_s1 = QtWidgets.QLabel("<small style='color:#6B7280;'>Dựng biên dạng kín 2D (Wire/Face) để kiểm tra hình học trước khi lên khối.</small>")
         tip_s1.setWordWrap(True)
         layout_s1.addWidget(tip_s1)
         self.workflow_tabs.addTab(tab_step1, "✏️ Bước 1: Phác thảo 2D")
@@ -326,8 +396,8 @@ class AICADDockWidget(QtWidgets.QDockWidget):
 
         layout_s3.addWidget(mod_group)
 
-        # AI Examiner Modification Section
-        ai_mod_group = QtWidgets.QGroupBox("2. AI Sửa trực tiếp theo lệnh giám khảo (Live AI Edit)")
+        # AI Live Modification Section
+        ai_mod_group = QtWidgets.QGroupBox("2. Tùy biến / Chỉnh sửa trực tiếp bằng AI (Live AI Edit)")
         ai_mod_layout = QtWidgets.QVBoxLayout(ai_mod_group)
         ai_mod_layout.setContentsMargins(4, 4, 4, 4)
         ai_mod_layout.setSpacing(3)
@@ -452,7 +522,7 @@ class AICADDockWidget(QtWidgets.QDockWidget):
         layout.addLayout(action_layout)
 
         # Status Bar
-        self.status_label = QtWidgets.QLabel("🟢 Sẵn sàng (Quy Trình 3 Bước Kỹ Sư)")
+        self.status_label = QtWidgets.QLabel("🟢 Sẵn sàng")
         self.status_label.setStyleSheet("color: #10B981; font-weight: bold;")
         layout.addWidget(self.status_label)
 
@@ -484,7 +554,7 @@ class AICADDockWidget(QtWidgets.QDockWidget):
 
     def on_preset_2d_selected(self, index):
         if 0 < index < len(PRESET_2D_SKETCHES):
-            _, text, plane = PRESET_2D_SKETCHES[index]
+            _, text, plane, code = PRESET_2D_SKETCHES[index]
             self.prompt_2d.setPlainText(text)
             if plane == "XZ":
                 self.combo_plane.setCurrentIndex(1)
@@ -492,6 +562,32 @@ class AICADDockWidget(QtWidgets.QDockWidget):
                 self.combo_plane.setCurrentIndex(2)
             else:
                 self.combo_plane.setCurrentIndex(0)
+            if code:
+                self.code_edit.setPlainText(code.strip())
+
+    def align_view_to_plane(self, plane="XY"):
+        """Align FreeCAD 3D viewport camera directly to the active sketch plane"""
+        try:
+            p = str(plane).strip().upper()
+            if hasattr(Gui, "SendMsgToActiveView"):
+                if "XZ" in p or "FRONT" in p:
+                    Gui.SendMsgToActiveView("ViewFront")
+                elif "YZ" in p or "SIDE" in p or "RIGHT" in p:
+                    Gui.SendMsgToActiveView("ViewRight")
+                else:
+                    Gui.SendMsgToActiveView("ViewTop")
+                Gui.SendMsgToActiveView("ViewFit")
+            elif Gui.activeDocument() and hasattr(Gui.activeDocument(), "activeView"):
+                av = Gui.activeDocument().activeView()
+                if "XZ" in p or "FRONT" in p:
+                    av.viewFront()
+                elif "YZ" in p or "SIDE" in p or "RIGHT" in p:
+                    av.viewRight()
+                else:
+                    av.viewTop()
+                av.viewFit()
+        except Exception:
+            pass
 
     def on_preset_selected(self, index):
         if 0 < index < len(PRESET_PROMPTS):
@@ -529,6 +625,20 @@ class AICADDockWidget(QtWidgets.QDockWidget):
         plane_raw = self.combo_plane.currentText()
         plane = "XY" if "XY" in plane_raw else ("XZ" if "XZ" in plane_raw else "YZ")
 
+        # Fast path 1: If the prompt matches one of our verified 2D presets, execute with 100% precision!
+        for _, text, p, code in PRESET_2D_SKETCHES:
+            if text and prompt == text.strip() and code:
+                self.log(f"\n--- [Bước 1: Phác thảo 2D mẫu ({plane})] ---\n{prompt}")
+                self.on_draw_2d_success(code.strip())
+                return
+
+        # Fast path 2: Parametric engineering synthesis (Pulley, Flange, Shaft)
+        synth_code = self.engine.synthesize_engineering_code(prompt, plane=plane, step="2d")
+        if synth_code:
+            self.log(f"\n--- [Bước 1: Phác thảo 2D tham số ({plane})] ---\n{prompt}")
+            self.on_draw_2d_success(synth_code.strip())
+            return
+
         self.engine.endpoint = self.endpoint_edit.text().strip()
         self.engine.model = self.model_combo.currentText().strip()
         self.engine.mode = self.mode_combo.currentData()
@@ -540,7 +650,7 @@ class AICADDockWidget(QtWidgets.QDockWidget):
         self.set_status(f"✏️ AI đang phác thảo biên dạng 2D trên mặt phẳng {plane}...", "#0284C7")
         self.log(f"\n--- [Bước 1: Phác thảo 2D ({plane})] ---\n{prompt}")
 
-        self.worker = LLMInferenceWorker(self.engine, sketch_prompt)
+        self.worker = LLMInferenceWorker(self.engine, sketch_prompt, system_prompt=DEFAULT_2D_SKETCH_SYSTEM_PROMPT)
         self.worker.finished.connect(self.on_draw_2d_success)
         self.worker.failed.connect(self.on_inference_error)
         self.worker.start()
@@ -548,6 +658,11 @@ class AICADDockWidget(QtWidgets.QDockWidget):
     def on_draw_2d_success(self, code):
         self.btn_draw_2d.setEnabled(True)
         self.btn_draw_2d.setText("✏️ Dựng Bản Phác Thảo 2D")
+
+        # In Step 1, guarantee that the code only produces a 2D sketch, not a 3D solid
+        plane_raw = self.combo_plane.currentText()
+        plane = "XY" if "XY" in plane_raw else ("XZ" if "XZ" in plane_raw else "YZ")
+
         self.engine.last_generated_code = code
         self.code_edit.setPlainText(code)
 
@@ -559,6 +674,7 @@ class AICADDockWidget(QtWidgets.QDockWidget):
             self.log(f"Thành công 2D: {msg}")
             self.tabs.setCurrentIndex(0)
             self.update_geometry_inspector()
+            self.align_view_to_plane(plane)
             # Switch to Step 2 tab automatically to guide the engineer!
             self.workflow_tabs.setCurrentIndex(1)
         else:
@@ -670,6 +786,13 @@ class AICADDockWidget(QtWidgets.QDockWidget):
             QtWidgets.QMessageBox.warning(self, "Thiếu thông tin", "Vui lòng nhập mô tả chi tiết hình học cần tạo!")
             return
 
+        # Fast path: Parametric engineering synthesis for 3D model
+        synth_code = self.engine.synthesize_engineering_code(prompt, step="3d")
+        if synth_code:
+            self.log(f"\n--- [Tạo mới 1-Click Tham số] ---\n{prompt}")
+            self.on_inference_success(synth_code.strip())
+            return
+
         self.engine.endpoint = self.endpoint_edit.text().strip()
         self.engine.model = self.model_combo.currentText().strip()
         self.engine.mode = self.mode_combo.currentData()
@@ -677,7 +800,7 @@ class AICADDockWidget(QtWidgets.QDockWidget):
         self.btn_generate.setEnabled(False)
         self.btn_modify.setEnabled(False)
         self.btn_generate.setText("⏳ Đang sinh...")
-        self.set_status("⏳ AI đang suy luận trên GPU RTX 3050...", "#D97706")
+        self.set_status("⏳ AI đang suy luận...", "#D97706")
         self.log(f"\n--- [Tạo mới 1-Click ({self.engine.mode})] ---\n{prompt}")
 
         self.worker = LLMInferenceWorker(self.engine, prompt)
@@ -707,10 +830,10 @@ class AICADDockWidget(QtWidgets.QDockWidget):
         self.btn_modify.setEnabled(False)
         self.btn_step3_ai_modify.setEnabled(False)
         self.btn_modify.setText("⏳ Đang sửa...")
-        self.set_status("🔄 AI đang chỉnh sửa mô hình theo yêu cầu giám khảo...", "#D97706")
+        self.set_status("🔄 AI đang chỉnh sửa mô hình...", "#D97706")
         self.log(f"\n--- [Yêu cầu chỉnh sửa đa lượt ({self.engine.mode})] ---\n{edit_instruction}")
 
-        self.worker = LLMInferenceWorker(self.engine, modify_prompt)
+        self.worker = LLMInferenceWorker(self.engine, modify_prompt, system_prompt=DEFAULT_MODIFICATION_SYSTEM_PROMPT)
         self.worker.finished.connect(self.on_modify_success)
         self.worker.failed.connect(self.on_inference_error)
         self.worker.start()
@@ -727,7 +850,7 @@ class AICADDockWidget(QtWidgets.QDockWidget):
         success, msg = self.engine.execute_code(code)
 
         if success:
-            self.set_status("✅ Chỉnh sửa mô hình theo yêu cầu giám khảo thành công!", "#16A34A")
+            self.set_status("✅ Chỉnh sửa mô hình thành công!", "#16A34A")
             self.log("Thành công: " + msg)
             self.tabs.setCurrentIndex(0)
             self.btn_fix.setEnabled(False)
@@ -899,3 +1022,23 @@ class AICADDockWidget(QtWidgets.QDockWidget):
             App.ActiveDocument.recompute()
             self.set_status("🗑 Đã xóa mô hình khỏi FreeCAD.", "#6B7280")
             self.update_geometry_inspector()
+
+
+_dock_widget_instance = None
+
+
+def toggle_aicad_dock():
+    """Toggle visibility of the AICAD Assistant dock widget in FreeCAD GUI"""
+    global _dock_widget_instance
+    main_window = Gui.getMainWindow() if hasattr(Gui, "getMainWindow") else None
+    if _dock_widget_instance is None:
+        _dock_widget_instance = AICADDockWidget(main_window)
+        if main_window:
+            main_window.addDockWidget(QtCore.Qt.RightDockWidgetArea, _dock_widget_instance)
+
+    if _dock_widget_instance.isVisible():
+        _dock_widget_instance.hide()
+    else:
+        _dock_widget_instance.show()
+        _dock_widget_instance.raise_()
+

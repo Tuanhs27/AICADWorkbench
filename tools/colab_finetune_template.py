@@ -78,7 +78,7 @@ trainer = SFTTrainer(
 print("[*] Đang bắt đầu huấn luyện SFT...")
 trainer.train()
 
-# Bước 6: Xuất mô hình sang định dạng GGUF q4_k_m để nạp thẳng vào Ollama trên RTX 3050!
+# Bước 6: Xuất mô hình sang định dạng GGUF q4_k_m để nạp vào Ollama!
 print("[*] Xuất mô hình sang GGUF (4-bit quantize)...")
 model.save_pretrained_gguf("qwen2.5_coder_cadquery_sft", tokenizer, quantization_method = "q4_k_m")
 print("[+] Hoàn tất! Tải file 'qwen2.5_coder_cadquery_sft-q4_k_m.gguf' về máy tính.")

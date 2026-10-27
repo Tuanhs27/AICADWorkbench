@@ -1,0 +1,5 @@
+FROM ./Qwen2.5-Coder-3B-Instruct.Q4_K_M_v2.gguf
+TEMPLATE "{{ .Prompt }}"
+PARAMETER stop "<|im_end|>"
+PARAMETER temperature 0.2
+

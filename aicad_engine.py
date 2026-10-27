@@ -9,17 +9,40 @@ import os
 import re
 import sys
 import json
+import math
 import urllib.request
 import urllib.error
 
+_DLL_COOKIES = []
 try:
     import FreeCAD as App
     import FreeCADGui as Gui
     import Part
 except ImportError:
-    App = None
-    Gui = None
-    Part = None
+    FREECAD_PATHS = [
+        r"C:\Program Files\FreeCAD 1.1\bin",
+        r"C:\Program Files\FreeCAD 1.1\lib",
+        r"C:\Program Files\FreeCAD 1.0\bin",
+        r"C:\Program Files\FreeCAD 0.21\bin",
+    ]
+    for p in FREECAD_PATHS:
+        if os.path.exists(p):
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    _DLL_COOKIES.append(os.add_dll_directory(p))
+                except Exception:
+                    pass
+            os.environ["PATH"] = p + ";" + os.environ.get("PATH", "")
+            if p not in sys.path:
+                sys.path.insert(0, p)
+    try:
+        import FreeCAD as App
+        import FreeCADGui as Gui
+        import Part
+    except ImportError:
+        App = None
+        Gui = None
+        Part = None
 
 import cadquery_bridge
 
@@ -62,6 +85,24 @@ QUY TẮC CỐT LÕI:
         .revolve(360, (0, 0, 0), (0, 0, 1)))
 7. Gán đối tượng mô hình cuối cùng vào biến 'r' và gọi show_object(r). Không đưa thêm giải thích bên ngoài khối mã."""
 
+DEFAULT_2D_SKETCH_SYSTEM_PROMPT = """Bạn là trợ lý AI chuyên tạo bản phác thảo biên dạng 2D cơ khí phẳng kín (Sketch Contour) cho FreeCAD bằng CadQuery.
+QUY TẮC CỐT LÕI (BƯỚC 1: DỰNG HÌNH 2D):
+1. TUYỆT ĐỐI KHÔNG ĐÙN 3D (.extrude) hay tạo khối hộp 3D (.box) hay .cylinder() hay xoay tròn 3D (.revolve). ĐÂY LÀ BƯỚC PHÁC THẢO 2D PHẲNG.
+2. Dùng đúng mặt phẳng được chỉ định ('XY', 'XZ', hoặc 'YZ').
+3. Dùng các lệnh vẽ 2D chuẩn:
+   - Với hình tròn: .circle(radius) với bán kính = đường kính / 2.0.
+   - Với hình chữ nhật: .rect(width, height)
+   - Với mặt cắt puly hoặc trục bậc: vẽ nửa mặt cắt trên 'XZ' dùng .moveTo(), .lineTo(), và kết thúc bằng .close().
+4. Gán đối tượng 2D vào biến 'r' và gọi show_object(r).
+5. Chỉ xuất khối mã ```python ... ``` duy nhất, không giải thích."""
+
+DEFAULT_MODIFICATION_SYSTEM_PROMPT = """Bạn là trợ lý AI chuyên gia công và chỉnh sửa mã CadQuery 3D cho FreeCAD theo yêu cầu thiết kế của người dùng.
+QUY TẮC:
+1. Đọc kỹ mã CAD hiện tại và yêu cầu chỉnh sửa từ người dùng.
+2. Áp dụng sửa đổi trực tiếp lên mô hình (ví dụ: thêm lỗ khoét .cut(), bo tròn .fillet(), vát mép .chamfer(), đổi kích thước, thêm hoa văn lỗ bu-lông).
+3. Gán kết quả mô hình vào biến 'r' và gọi show_object(r).
+4. Chỉ xuất mã python hoàn chỉnh trong khối ```python ... ```."""
+
 DEFAULT_FREECAD_SYSTEM_PROMPT = """You are an expert FreeCAD Python developer.
 Generate valid, mathematically precise, robust FreeCAD Python scripts using the `Part` module.
 
@@ -101,15 +142,21 @@ class AICADEngine:
         self.last_generated_code = ""
         self.last_error = ""
 
-    def query_ollama(self, prompt, temperature=0.2):
+    def query_ollama(self, prompt, temperature=0.2, system_prompt=None):
         """Query Ollama generate API (http://localhost:11434/api/generate)"""
         url = f"{self.endpoint}/api/generate"
         
-        # Format prompt according to selected mode
-        if self.mode == "cadquery":
+        # Format prompt according to selected mode & custom system prompt
+        if system_prompt is not None:
+            sys_prompt = system_prompt
+            formatted_prompt = prompt
+        elif self.mode == "cadquery":
             sys_prompt = DEFAULT_CADQUERY_SYSTEM_PROMPT
-            # Align with the cleaned dataset prefix
-            if not prompt.startswith("Dựa vào mô tả sau đây") and not prompt.startswith("Please based on"):
+            # Align with the cleaned dataset prefix only for raw prompt
+            if (not prompt.startswith("Dựa vào mô tả sau đây") 
+                and not prompt.startswith("Please based on")
+                and not prompt.startswith("Bạn là")
+                and "QUY TẮC" not in prompt):
                 formatted_prompt = f"Dựa vào mô tả sau đây, hãy tạo mã CadQuery để tạo mô hình 3D:\n{prompt}"
             else:
                 formatted_prompt = prompt
@@ -167,26 +214,40 @@ class AICADEngine:
             obj = doc.Objects[-1]
         if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull():
             return None
-        
+
         shape = obj.Shape
         bbox = shape.BoundBox
+        if not getattr(bbox, "isValid", lambda: True)() or bbox.XMax < bbox.XMin or bbox.XMax == float("inf") or bbox.XMax == float("-inf"):
+            return None
+
         return {
             "name": obj.Name,
-            "x": bbox.XMax - bbox.XMin,
-            "y": bbox.YMax - bbox.YMin,
-            "z": bbox.ZMax - bbox.ZMin,
-            "volume": getattr(shape, "Volume", 0.0),
+            "x": max(0.0, bbox.XMax - bbox.XMin),
+            "y": max(0.0, bbox.YMax - bbox.YMin),
+            "z": max(0.0, bbox.ZMax - bbox.ZMin),
+            "volume": max(0.0, getattr(shape, "Volume", 0.0)),
             "solids": len(getattr(shape, "Solids", [])),
             "faces": len(getattr(shape, "Faces", []))
         }
 
     def extract_code(self, response_text):
-        """Extract Python code block from markdown response"""
+        """Extract Python code block from markdown response and clean indentation"""
+        import textwrap
         pattern = r"```(?:python)?\s*(.*?)\s*```"
         matches = re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
-        if matches:
-            return matches[0].strip()
-        return response_text.strip()
+        code = matches[0].strip() if matches else response_text.strip()
+
+        # Clean accidental leading spaces / indentation quirks from LLM tokens
+        code = textwrap.dedent(code).strip()
+        clean_lines = []
+        for line in code.splitlines():
+            s = line.lstrip(" ")
+            # If line starts with non-nested statement, remove leading spaces to prevent IndentationError
+            if s.startswith(("import ", "from ", "#", "r =", "show_object", "def ", "class ", "sketch =", "cylinder =", "box =", "outer =", "inner =", "plate =", "hole =", "holes =")):
+                clean_lines.append(s)
+            else:
+                clean_lines.append(line)
+        return "\n".join(clean_lines).strip()
 
     def execute_code(self, code_str):
         """Execute script (CadQuery or Native FreeCAD) within FreeCAD document context"""
@@ -218,10 +279,14 @@ class AICADEngine:
         try:
             exec(code_str, exec_globals)
 
-            # If CadQuery returned an object assigned to 'r'
-            if "r" in exec_globals and exec_globals["r"] is not None:
-                r_val = exec_globals["r"]
-                cadquery_bridge.show_object(r_val, "AICAD_Model")
+            # If CadQuery returned an object assigned to 'r' or standard fallback variable names
+            found_obj = None
+            for var_name in ("r", "result", "model", "cylinder", "sketch", "part", "solid"):
+                if var_name in exec_globals and exec_globals[var_name] is not None:
+                    found_obj = exec_globals[var_name]
+                    break
+            if found_obj is not None:
+                cadquery_bridge.show_object(found_obj, "AICAD_Model")
 
             if App and App.ActiveDocument:
                 App.ActiveDocument.recompute()
@@ -252,12 +317,12 @@ class AICADEngine:
         )
 
     def build_modification_prompt(self, edit_instruction, current_code):
-        """Construct multi-turn modification prompt to update existing CAD code based on examiner/user request"""
+        """Construct multi-turn modification prompt to update existing CAD code based on user request"""
         if self.mode == "cadquery":
             return (
                 f"Dưới đây là mã CadQuery (Python) hiện tại của mô hình 3D đang hiển thị trên FreeCAD:\n"
                 f"```python\n{current_code.strip()}\n```\n\n"
-                f"YÊU CẦU CHỈNH SỬA TỪ GIÁM KHẢO / NGƯỜI DÙNG:\n"
+                f"YÊU CẦU CHỈNH SỬA THIẾT KẾ:\n"
                 f"\"{edit_instruction.strip()}\"\n\n"
                 f"HƯỚNG DẪN THỰC HIỆN:\n"
                 f"1. Hãy điều chỉnh, sửa đổi hoặc bổ sung trực tiếp trên mã nguồn cũ để đáp ứng chính xác yêu cầu chỉnh sửa trên.\n"
@@ -269,7 +334,7 @@ class AICADEngine:
             return (
                 f"Below is the current FreeCAD Python script for the active 3D model:\n"
                 f"```python\n{current_code.strip()}\n```\n\n"
-                f"USER / EXAMINER MODIFICATION REQUEST:\n"
+                f"USER MODIFICATION REQUEST:\n"
                 f"\"{edit_instruction.strip()}\"\n\n"
                 f"INSTRUCTIONS:\n"
                 f"1. Modify or extend the existing script to satisfy the modification request.\n"
@@ -406,11 +471,11 @@ class AICADEngine:
         """Prompt specifically for generating a pure 2D sketch/contour without 3D extrusion"""
         return (
             f"Bạn là chuyên gia phác thảo CAD 2D. Nhiệm vụ: Dựng bản phác thảo biên dạng phẳng 2D kín (Sketch Contour) trên mặt phẳng '{plane}'.\n\n"
-            f"MÔ TẢ YÊU CẦU 2D TỪ KỸ SƯ:\n"
+            f"MÔ TẢ YÊU CẦU PHÁC THẢO 2D:\n"
             f"\"{user_prompt.strip()}\"\n\n"
             f"QUY TẮC CỐT LÕI (BƯỚC 1: DỰNG HÌNH 2D):\n"
             f"1. Sử dụng Workplane('{plane}'). Sử dụng các lệnh 2D chuẩn: .moveTo(), .lineTo(), .threePointArc(), .polyline(), .circle(), .rect(), .close().\n"
-            f"2. TUYỆT ĐỐI KHÔNG ĐÙN 3D (.extrude) hay tạo khối hộp 3D (.box). Đây là bước dựng hình 2D phẳng để kỹ sư kiểm tra biên dạng.\n"
+            f"2. TUYỆT ĐỐI KHÔNG ĐÙN 3D (.extrude) hay tạo khối hộp 3D (.box). Đây là bước dựng hình 2D phẳng để kiểm tra biên dạng hình học.\n"
             f"3. Chu trình phác thảo BẮT BUỘC phải khép kín bằng .close() hoặc tạo thành hình phẳng 2D kín.\n"
             f"4. Ví dụ phác thảo mặt cắt chi tiết tròn xoay (Puly, Trục bậc) trên mặt phẳng 'XZ':\n"
             f"   r = (cq.Workplane('XZ')\n"
@@ -456,7 +521,7 @@ class AICADEngine:
                     Gui.SendMsgToActiveView("ViewFit")
             except Exception:
                 pass
-            snippet = f"\n# Bước 2 (Kỹ sư): Đùn khối 3D (Extrude) dày {dist}mm:\nr = r.extrude({dist})\nshow_object(r)\n"
+            snippet = f"\n# Bước 2: Đùn khối 3D (Extrude) dày {dist}mm:\nr = r.extrude({dist})\nshow_object(r)\n"
             return True, f"Đã đùn khối 3D thành công với chiều dày {dist}mm!", snippet
         except Exception as e:
             return False, f"Lỗi đùn khối 3D: {e}", ""
@@ -490,8 +555,195 @@ class AICADEngine:
                     Gui.SendMsgToActiveView("ViewFit")
             except Exception:
                 pass
-            snippet = f"\n# Bước 2 (Kỹ sư): Xoay tròn 3D (Revolve) quanh trục {axis} góc {ang}°:\nr = r.revolve({ang}, (0, 0, 0), {tuple(v_axis)})\nshow_object(r)\n"
+            snippet = f"\n# Bước 2: Xoay tròn 3D (Revolve) quanh trục {axis} góc {ang}°:\nr = r.revolve({ang}, (0, 0, 0), {tuple(v_axis)})\nshow_object(r)\n"
             return True, f"Đã xoay tròn 3D thành công quanh trục {axis} góc {ang}°!", snippet
         except Exception as e:
             return False, f"Lỗi xoay tròn 3D: {e}", ""
+
+    def synthesize_engineering_code(self, prompt, plane="XY", step="2d"):
+        """
+        Parametric synthesis for common engineering components (Pulley, Flange, Shaft, Bracket).
+        Returns generated Python CadQuery code if prompt matches an engineering archetype, else None.
+        """
+        p = prompt.lower().strip()
+        
+        # 1. Pulley with V-groove (Puly đai thang rãnh V)
+        if any(k in p for k in ["puly", "pulley", "đai thang", "rãnh v", "rãnh chữ v"]):
+            m_dout = re.search(r'(?:đường kính ngoài|d_ngoai|ngoài)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            dout = float(m_dout.group(1)) if m_dout else 80.0
+            
+            m_h = re.search(r'(?:chiều dày|bề dày|dày)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            h = float(m_h.group(1)) if m_h else 25.0
+            
+            m_depth = re.search(r'(?:sâu|độ sâu)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            depth = float(m_depth.group(1)) if m_depth else 10.0
+            
+            m_ang = re.search(r'(?:góc)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            ang = float(m_ang.group(1)) if m_ang else 38.0
+            
+            m_shaft = re.search(r'(?:lỗ trục|trục tâm|tâm phi|phi)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            shaft = float(m_shaft.group(1)) if m_shaft else 15.0
+            
+            r_in = shaft / 2.0
+            r_out = dout / 2.0
+            r_groove = max(r_in + 2.0, r_out - depth)
+            half_w = round(depth * math.tan(math.radians(ang / 2.0)), 2)
+            
+            if step == "2d":
+                return (
+                    f"import cadquery as cq\n\n"
+                    f"# Bước 1: Phác thảo 2D nửa mặt cắt puly đai thang rãnh V trên mặt phẳng XZ\n"
+                    f"r_in = {r_in}\n"
+                    f"r_out = {r_out}\n"
+                    f"h = {h}\n"
+                    f"r_groove = {r_groove}\n"
+                    f"half_w = {half_w}\n\n"
+                    f"r = (\n"
+                    f"    cq.Workplane('XZ')\n"
+                    f"    .moveTo(r_in, -h / 2.0)\n"
+                    f"    .lineTo(r_out, -h / 2.0)\n"
+                    f"    .lineTo(r_out, -half_w)\n"
+                    f"    .lineTo(r_groove, 0.0)\n"
+                    f"    .lineTo(r_out, half_w)\n"
+                    f"    .lineTo(r_out, h / 2.0)\n"
+                    f"    .lineTo(r_in, h / 2.0)\n"
+                    f"    .close()\n"
+                    f")\n"
+                    f"show_object(r)\n"
+                )
+            else:  # 3D
+                return (
+                    f"import cadquery as cq\n\n"
+                    f"# Tạo Puly đai thang rãnh V 3D hoàn chỉnh bằng Revolve\n"
+                    f"r_in = {r_in}\n"
+                    f"r_out = {r_out}\n"
+                    f"h = {h}\n"
+                    f"r_groove = {r_groove}\n"
+                    f"half_w = {half_w}\n\n"
+                    f"r = (\n"
+                    f"    cq.Workplane('XZ')\n"
+                    f"    .moveTo(r_in, -h / 2.0)\n"
+                    f"    .lineTo(r_out, -h / 2.0)\n"
+                    f"    .lineTo(r_out, -half_w)\n"
+                    f"    .lineTo(r_groove, 0.0)\n"
+                    f"    .lineTo(r_out, half_w)\n"
+                    f"    .lineTo(r_out, h / 2.0)\n"
+                    f"    .lineTo(r_in, h / 2.0)\n"
+                    f"    .close()\n"
+                    f"    .revolve(360, (0, 0, 0), (0, 0, 1))\n"
+                    f")\n"
+                    f"show_object(r)\n"
+                )
+
+        # 2. Round Flange (Mặt bích tròn)
+        if any(k in p for k in ["bích tròn", "flange tròn", "mặt bích tròn", "round flange"]) or ("mặt bích" in p and "tròn" in p):
+            m_dout = re.search(r'(?:đường kính ngoài|d_ngoai|ngoài)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            dout = float(m_dout.group(1)) if m_dout else 100.0
+            
+            m_h = re.search(r'(?:chiều dày|bề dày|dày)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            h = float(m_h.group(1)) if m_h else 12.0
+            
+            m_nholes = re.search(r'(\d+)\s*lỗ', p)
+            nholes = int(m_nholes.group(1)) if m_nholes else 6
+            
+            m_dhole = re.search(r'(?:lỗ bu-lông|lỗ bu lông|lỗ bulong|lỗ).*?đường kính\s*(\d+(?:\.\d+)?)', p)
+            dhole = float(m_dhole.group(1)) if m_dhole else 6.0
+            
+            m_pcd = re.search(r'(?:vòng chia|đường kính chia|vòng chia đường kính)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            pcd = float(m_pcd.group(1)) if m_pcd else 70.0
+            
+            m_center = re.search(r'(?:lỗ trục|lỗ tâm|tâm phi|trục phi)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            dcenter = float(m_center.group(1)) if m_center else 30.0
+
+            r_out = dout / 2.0
+            r_center = dcenter / 2.0
+            r_hole = dhole / 2.0
+            r_pcd = pcd / 2.0
+
+            if step == "2d":
+                code = (
+                    f"import cadquery as cq\nimport math\n\n"
+                    f"# Bước 1: Phác thảo 2D biên dạng mặt bích tròn D{dout} có lỗ tâm D{dcenter}\n"
+                    f"outer = cq.Workplane('XY').circle({r_out})\n"
+                    f"inner = cq.Workplane('XY').circle({r_center})\n"
+                    f"r = outer.cut(inner)\n"
+                )
+                if nholes > 0:
+                    code += (
+                        f"\n# {nholes} lỗ bu-lông phân bố đều trên vòng chia D{pcd}\n"
+                        f"bolt_pts = [\n"
+                        f"    ({r_pcd} * math.cos(2 * math.pi * i / {nholes}), {r_pcd} * math.sin(2 * math.pi * i / {nholes}))\n"
+                        f"    for i in range({nholes})\n"
+                        f"]\n"
+                        f"bolt_holes = cq.Workplane('XY').pushPoints(bolt_pts).circle({r_hole})\n"
+                        f"r = r.cut(bolt_holes)\n"
+                    )
+                code += "\nshow_object(r)\n"
+                return code
+            else:
+                return (
+                    f"import cadquery as cq\nimport math\n\n"
+                    f"# Tạo Mặt bích tròn D{dout} dày {h}mm có {nholes} lỗ bu-lông trên vòng chia D{pcd}\n"
+                    f"flange = cq.Workplane('XY').circle({r_out}).extrude({h})\n"
+                    f"center_hole = cq.Workplane('XY').circle({r_center}).extrude({h * 2.0}, both=True)\n"
+                    f"r = flange.cut(center_hole)\n\n"
+                    f"bolt_pts = [\n"
+                    f"    ({r_pcd} * math.cos(2 * math.pi * i / {nholes}), {r_pcd} * math.sin(2 * math.pi * i / {nholes}))\n"
+                    f"    for i in range({nholes})\n"
+                    f"]\n"
+                    f"bolt_holes = cq.Workplane('XY').pushPoints(bolt_pts).circle({r_hole}).extrude({h * 2.0}, both=True)\n"
+                    f"r = r.cut(bolt_holes)\n"
+                    f"show_object(r)\n"
+                )
+
+        # 3. Square Flange / Base Plate (Mặt bích vuông / Tấm gá)
+        if any(k in p for k in ["bích vuông", "mặt bích vuông", "tấm gá", "đế gá", "square flange"]):
+            m_w = re.search(r'(?:kích thước|vuông|cạnh)?\s*(\d+(?:\.\d+)?)\s*[xX]\s*(\d+(?:\.\d+)?)', p)
+            if m_w:
+                w, l = float(m_w.group(1)), float(m_w.group(2))
+            else:
+                m_dim = re.search(r'(?:vuông|rộng)\s*(\d+(?:\.\d+)?)', p)
+                w = float(m_dim.group(1)) if m_dim else 80.0
+                l = w
+
+            m_h = re.search(r'(?:chiều dày|bề dày|dày)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            h = float(m_h.group(1)) if m_h else 10.0
+
+            m_center = re.search(r'(?:lỗ tâm|tâm phi|phi)\s*[:=]?\s*(\d+(?:\.\d+)?)', p)
+            dcenter = float(m_center.group(1)) if m_center else 0.0
+
+            if step == "2d":
+                code = f"import cadquery as cq\n\n# Bước 1: Phác thảo 2D mặt bích vuông {w}x{l}mm\n"
+                code += f"r = cq.Workplane('XY').rect({w}, {l})\n"
+                if dcenter > 0:
+                    code += f"hole = cq.Workplane('XY').circle({dcenter / 2.0})\nr = r.cut(hole)\n"
+                corner_offset_x = (w / 2.0) - 10.0
+                corner_offset_y = (l / 2.0) - 10.0
+                code += (
+                    f"pts = [({corner_offset_x}, {corner_offset_y}), (-{corner_offset_x}, {corner_offset_y}), "
+                    f"(-{corner_offset_x}, -{corner_offset_y}), ({corner_offset_x}, -{corner_offset_y})]\n"
+                    f"holes = cq.Workplane('XY').pushPoints(pts).circle(2.5)\n"
+                    f"r = r.cut(holes)\n"
+                )
+                code += "show_object(r)\n"
+                return code
+            else:
+                code = (
+                    f"import cadquery as cq\n\n"
+                    f"# Tạo Mặt bích vuông {w}x{l}mm dày {h}mm có 4 lỗ bắt ốc góc\n"
+                    f"plate = cq.Workplane('XY').box({w}, {l}, {h})\n"
+                )
+                if dcenter > 0:
+                    code += f"center_hole = cq.Workplane('XY').circle({dcenter / 2.0}).extrude({h * 2}, both=True)\nplate = plate.cut(center_hole)\n"
+                corner_offset_x = (w / 2.0) - 10.0
+                corner_offset_y = (l / 2.0) - 10.0
+                code += (
+                    f"pts = [({corner_offset_x}, {corner_offset_y}), (-{corner_offset_x}, {corner_offset_y}), "
+                    f"(-{corner_offset_x}, -{corner_offset_y}), ({corner_offset_x}, -{corner_offset_y})]\n"
+                    f"holes = cq.Workplane('XY').pushPoints(pts).circle(2.5).extrude({h * 2}, both=True)\n"
+                    f"r = plate.cut(holes)\nshow_object(r)\n"
+                )
+                return code
+
+        return None
 

@@ -23,7 +23,11 @@ class OpenAICADPanelCommand:
         }
 
     def Activated(self):
+        import importlib
+        import aicad_engine
         import aicad_gui
+        importlib.reload(aicad_engine)
+        importlib.reload(aicad_gui)
         aicad_gui.toggle_aicad_dock()
 
     def IsActive(self):

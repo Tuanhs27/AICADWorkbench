@@ -10,6 +10,40 @@ and automatic cutting-tool generation.
 
 import math
 import sys
+import os
+
+# Math aliases commonly used in CadQuery scripts
+pi = math.pi
+e = math.e
+cos = math.cos
+sin = math.sin
+tan = math.tan
+acos = math.acos
+asin = math.asin
+atan = math.atan
+atan2 = math.atan2
+sqrt = math.sqrt
+radians = math.radians
+degrees = math.degrees
+
+# Auto-inject FreeCAD paths and C++ DLL directories for Windows Python
+_DLL_COOKIES = []
+FREECAD_PATHS = [
+    r"C:\Program Files\FreeCAD 1.1\bin",
+    r"C:\Program Files\FreeCAD 1.1\lib",
+    r"C:\Program Files\FreeCAD 1.0\bin",
+    r"C:\Program Files\FreeCAD 0.21\bin",
+]
+for p in FREECAD_PATHS:
+    if os.path.exists(p):
+        if hasattr(os, "add_dll_directory"):
+            try:
+                _DLL_COOKIES.append(os.add_dll_directory(p))
+            except Exception:
+                pass
+        os.environ["PATH"] = p + ";" + os.environ.get("PATH", "")
+        if p not in sys.path:
+            sys.path.insert(0, p)
 
 try:
     import FreeCAD as App
@@ -81,8 +115,8 @@ class Vector:
 def _make_cutting_tool(shape_2d_or_3d, target_solid):
     """
     If shape is already a 3D solid, return as is.
-    If shape is a 2D Face or Wire, extrude it across target_solid bounding box
-    so it cleanly penetrates and cuts through target_solid.
+    If shape is a 2D Face or Wire, extrude it along its normal vector across target_solid bounding box
+    so it cleanly penetrates and cuts through target_solid on any plane (XY, XZ, YZ).
     """
     if Part is None or shape_2d_or_3d is None:
         return shape_2d_or_3d
@@ -94,20 +128,40 @@ def _make_cutting_tool(shape_2d_or_3d, target_solid):
     # Shape is 2D (Face or Wire)
     face = shape_2d_or_3d
     if len(getattr(shape_2d_or_3d, "Faces", [])) == 0 and len(getattr(shape_2d_or_3d, "Wires", [])) > 0:
-        face = Part.Face(shape_2d_or_3d.Wires[0])
+        try:
+            face = Part.Face(shape_2d_or_3d.Wires[0])
+        except Exception:
+            return shape_2d_or_3d
 
+    norm = App.Vector(0, 0, 1)
+    if hasattr(face, "Faces") and face.Faces:
+        try:
+            norm = face.Faces[0].normalAt(0, 0)
+        except Exception:
+            pass
+    elif hasattr(face, "normalAt"):
+        try:
+            norm = face.normalAt(0, 0)
+        except Exception:
+            pass
+
+    if norm.Length < 1e-4:
+        norm = App.Vector(0, 0, 1)
+    else:
+        norm = norm.normalize()
+
+    span = 200.0
     if target_solid is not None and hasattr(target_solid, "BoundBox"):
         bbox = target_solid.BoundBox
-        z_span = max(abs(bbox.ZMax - bbox.ZMin), 10.0)
-        z_min = bbox.ZMin - z_span * 0.5 - 5.0
-        z_len = z_span * 2.0 + 10.0
-    else:
-        z_min = -500.0
-        z_len = 1000.0
+        diag = max(abs(bbox.XMax - bbox.XMin), abs(bbox.YMax - bbox.YMin), abs(bbox.ZMax - bbox.ZMin), 10.0)
+        span = diag * 3.0
 
-    cutter = face.copy()
-    cutter.translate(App.Vector(0, 0, z_min))
-    return cutter.extrude(App.Vector(0, 0, z_len))
+    try:
+        cutter = face.copy()
+        cutter.translate(norm * (-span * 0.5))
+        return cutter.extrude(norm * span)
+    except Exception:
+        return shape_2d_or_3d
 
 
 class Workplane:
@@ -186,13 +240,27 @@ class Workplane:
     def __add__(self, other):
         return self.union(other)
 
-    def moveTo(self, x, y, z=0.0):
+    def moveTo(self, x, y=None, z=0.0):
+        if y is None:
+            if isinstance(x, (tuple, list)) or hasattr(x, "__getitem__"):
+                x, y = x[0], x[1]
+            elif hasattr(x, "x") and hasattr(x, "y"):
+                x, y = x.x, x.y
+            else:
+                y = 0.0
         self._cur_pt = (float(x), float(y))
         self._pts = [(float(x), float(y))]
         self._edges = []
         return self
 
-    def lineTo(self, x, y, z=0.0):
+    def lineTo(self, x, y=None, z=0.0):
+        if y is None:
+            if isinstance(x, (tuple, list)) or hasattr(x, "__getitem__"):
+                x, y = x[0], x[1]
+            elif hasattr(x, "x") and hasattr(x, "y"):
+                x, y = x.x, x.y
+            else:
+                y = 0.0
         p1 = self._to_3d_point(self._cur_pt[0], self._cur_pt[1])
         p2 = self._to_3d_point(x, y)
         if p1 is not None and p2 is not None and (p2 - p1).Length > 1e-6 and Part is not None:
@@ -526,8 +594,35 @@ class Workplane:
         flat = _flatten_shapes(others)
         for item in flat:
             s2 = item.val() if hasattr(item, "val") else item
-            if s2 is not None:
-                current_shape = current_shape.fuse(s2)
+            if s2 is None or (hasattr(s2, "isNull") and s2.isNull()):
+                continue
+            if current_shape is None or (hasattr(current_shape, "isNull") and current_shape.isNull()):
+                current_shape = s2
+                continue
+
+            s1_is_solid = len(getattr(current_shape, "Solids", [])) > 0
+            s2_is_solid = len(getattr(s2, "Solids", [])) > 0
+
+            try:
+                if s1_is_solid and not s2_is_solid:
+                    try:
+                        norm = self._get_normal()
+                        dist = 1.0
+                        if hasattr(current_shape, "BoundBox"):
+                            dist = max(abs(current_shape.BoundBox.ZMax - current_shape.BoundBox.ZMin), 1.0)
+                        s2_solid = s2.extrude(norm * dist)
+                        current_shape = current_shape.fuse(s2_solid)
+                    except Exception:
+                        pass
+                elif not s1_is_solid and s2_is_solid:
+                    current_shape = s2
+                else:
+                    current_shape = current_shape.fuse(s2)
+            except Exception:
+                try:
+                    current_shape = Part.Compound([current_shape, s2])
+                except Exception:
+                    pass
         return Workplane(self.plane, current_shape, self._center_offset)
 
     def add(self, *others, **kwargs):
@@ -543,23 +638,30 @@ class Workplane:
             return self
 
         current_shape = self.val()
+        if current_shape is None or (hasattr(current_shape, "isNull") and current_shape.isNull()):
+            return self
+
         for item in flat:
             s2 = item.val() if hasattr(item, "val") else item
-            if s2 is None:
+            if s2 is None or (hasattr(s2, "isNull") and s2.isNull()):
                 continue
 
             s1_is_solid = len(getattr(current_shape, "Solids", [])) > 0
             s2_is_solid = len(getattr(s2, "Solids", [])) > 0
 
-            if s1_is_solid and not s2_is_solid:
-                cutter = _make_cutting_tool(s2, current_shape)
-                current_shape = current_shape.cut(cutter)
-            elif not s1_is_solid and s2_is_solid:
-                cutter = s2
-                current_shape = current_shape.cut(cutter)
-            else:
-                # Both 3D solids or both 2D faces
-                current_shape = current_shape.cut(s2)
+            try:
+                if s1_is_solid and not s2_is_solid:
+                    cutter = _make_cutting_tool(s2, current_shape)
+                    if cutter is not None and hasattr(cutter, "isNull") and not cutter.isNull():
+                        current_shape = current_shape.cut(cutter)
+                elif not s1_is_solid and s2_is_solid:
+                    cutter = s2
+                    current_shape = current_shape.cut(cutter)
+                else:
+                    # Both 3D solids or both 2D faces
+                    current_shape = current_shape.cut(s2)
+            except Exception:
+                pass
 
         return Workplane(self.plane, current_shape, self._center_offset)
 
@@ -569,19 +671,52 @@ class Workplane:
         if not flat:
             return self
         current_shape = self.val()
+        if current_shape is None or (hasattr(current_shape, "isNull") and current_shape.isNull()):
+            return self
         for item in flat:
             s2 = item.val() if hasattr(item, "val") else item
-            if s2 is not None:
+            if s2 is None or (hasattr(s2, "isNull") and s2.isNull()):
+                continue
+            try:
                 current_shape = current_shape.common(s2)
+            except Exception:
+                pass
         return Workplane(self.plane, current_shape, self._center_offset)
 
     def val(self):
-        if self._shape is not None:
+        if self._shape is not None and not (hasattr(self._shape, "isNull") and self._shape.isNull()):
             return self._shape
         shape_2d = self._build_2d_shape()
-        if shape_2d is not None:
+        if shape_2d is not None and not (hasattr(shape_2d, "isNull") and shape_2d.isNull()):
             self._shape = shape_2d
             return self._shape
+        if self._edges:
+            try:
+                wire = Part.Wire(self._edges)
+                if not wire.isNull():
+                    try:
+                        face = Part.Face(wire)
+                        if not face.isNull():
+                            self._shape = face
+                            return self._shape
+                    except Exception:
+                        pass
+                    self._shape = wire
+                    return self._shape
+            except Exception:
+                pass
+        if len(self._pts) >= 3:
+            try:
+                vec_pts = [self._to_3d_point(px, py) for px, py in self._pts]
+                if vec_pts[0] != vec_pts[-1]:
+                    vec_pts.append(vec_pts[0])
+                poly = Part.makePolygon(vec_pts)
+                face = Part.Face(poly)
+                if not face.isNull():
+                    self._shape = face
+                    return self._shape
+            except Exception:
+                pass
         raise ValueError("Workplane has no 3D solid or 2D sketch generated!")
 
     def all(self):
@@ -612,6 +747,33 @@ def show_object(obj, name="AICAD_Model"):
     if fc_obj is None:
         fc_obj = doc.addObject("Part::Feature", name)
 
+    # Detach from any Body or Group to prevent PartDesign from swallowing the shape
+    for parent in doc.Objects:
+        if hasattr(parent, "Group") and fc_obj in parent.Group:
+            try:
+                parent.Group = [x for x in parent.Group if x != fc_obj]
+            except Exception:
+                pass
+
     fc_obj.Shape = shape
+
+    # Ensure high visibility and style in 3D Viewport
+    if hasattr(fc_obj, "ViewObject") and fc_obj.ViewObject is not None:
+        try:
+            fc_obj.ViewObject.Visibility = True
+            is_solid = len(getattr(shape, "Solids", [])) > 0
+            if not is_solid:
+                # 2D Sketch: High visibility cyan wireframe with thick lines
+                fc_obj.ViewObject.ShapeColor = (0.0, 0.8, 1.0)
+                fc_obj.ViewObject.LineColor = (0.0, 0.8, 1.0)
+                fc_obj.ViewObject.LineWidth = 3.0
+                fc_obj.ViewObject.PointSize = 5.0
+                fc_obj.ViewObject.DrawStyle = "Solid"
+                fc_obj.ViewObject.DisplayMode = "Flat Lines"
+            else:
+                fc_obj.ViewObject.DisplayMode = "Shaded"
+        except Exception:
+            pass
+
     doc.recompute()
     return fc_obj
